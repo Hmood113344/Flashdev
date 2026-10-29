@@ -169,7 +169,7 @@ const CONFIG = {
 };
 
 mongoose.connect(CONFIG.MONGO_URI)
-    .then(async () => { console.log("✅ MongoDB connected"); await copyOldMainDb().catch(e => console.error("❌ فشل نسخ القاعدة القديمة:", e.message)); await ensureSeniorAccount(); await ensureCardNumbers(); await migrateMpSector(); await ensureSectorFields(); await loadInvestigations(); await loadCourt(); })
+    .then(async () => { console.log("✅ MongoDB connected"); await copyOldMainDb().catch(e => console.error("❌ فشل نسخ القاعدة القديمة:", e.message)); await ensureSeniorAccount(); await ensureDevBots(); await ensureCardNumbers(); await migrateMpSector(); await ensureSectorFields(); await loadInvestigations(); await loadCourt(); })
     .catch(err => console.log("❌ MongoDB error:", err));
 
 // ── قاعدة بيانات منفصلة لصور المخالفات (base64): حط عنوانها في PHOTOS_MONGO_URI ──
@@ -525,6 +525,41 @@ async function ensureSeniorAccount() {
         await refreshSeniors();
         if (!seniorUids.size) console.log("ℹ️ ما فيه حسابات كبار مسؤولين — سجّل دخول بإيميل وكلمة المرور الافتراضية (ADMIN_EMAIL / ADMIN_PASSWORD) وينشأ لك حساب جديد");
     } catch (e) { console.error("❌ فشل تحميل حسابات كبار المسؤولين:", e.message); }
+}
+
+// ================= حسابات وهمية للتجربة (فلاش المطورين فقط) =================
+const DEV_BOTS = [
+    { n: 1, name: "بوت الدوريات",        sector: "patrol",       rank: "جندي",  unit: "P-101" },
+    { n: 2, name: "بوت أمن الطرق",       sector: "roadSecurity", rank: "عريف",  unit: "R-202" },
+    { n: 3, name: "بوت مكافحة المخدرات", sector: "antiDrugs",    rank: "رقيب",  unit: "D-303" },
+    { n: 4, name: "بوت الأمن السيبراني", sector: "cyber",        rank: "ملازم", unit: "C-404" },
+    { n: 5, name: "بوت الشرطة العسكرية", sector: "mp",           rank: "نقيب",  unit: "M-505" },
+];
+async function ensureDevBots() {
+    if (!__DEV_MODE__) return;
+    try {
+        const settings = await getSettings();
+        let made = 0;
+        for (const b of DEV_BOTS) {
+            const email = "bot" + b.n + "@flash.dev";
+            if (await Account.findOne({ email }, { _id: 1 }).lean()) continue;
+            const uid = "udevbot" + String(b.n).padStart(2, "0");
+            const pw = "Bot@12345";
+            await Account.create({
+                uid, email, fullName: b.name, age: 25, nationality: "سعودي",
+                passwordHash: hashPassword(pw), passwordEnc: encryptText(pw),
+                status: "approved", sector: b.sector, isMP: b.sector === "mp",
+                answers: { available: true, capable: true, terms: true },
+            });
+            let pts = 0; try { pts = await pointsForReachingRank(b.rank, settings); } catch (e) {}
+            await Personnel.updateOne({ discord: uid }, { $set: {
+                discordTag: b.name, registeredName: b.name, unit: b.unit, rank: b.rank, points: pts || 0,
+                sector: b.sector, leaveBalance: settings.leaveBalanceDefault || 10, cardNumber: await genCardNumber(),
+            } }, { upsert: true });
+            made++;
+        }
+        if (made) console.log("🤖 تم إنشاء " + made + " حسابات وهمية للتجربة (bot1@flash.dev ... bot5@flash.dev | كلمة السر Bot@12345)");
+    } catch (e) { console.error("❌ فشل إنشاء الحسابات الوهمية:", e.message); }
 }
 
 const ViolationSchema = new mongoose.Schema({
@@ -2013,6 +2048,35 @@ app.use(session({
 }));
 app.use(passport.initialize());
 app.use(passport.session());
+// ---- دخول المالك على أي حساب للتجربة (فلاش المطورين فقط) — قبل البوابات عشان ما تنحجب ----
+if (__DEV_MODE__) {
+    const devLogin = (req, res, next, uid, keepBack) => {
+        const back = keepBack ? req.user.id : null;
+        req.logIn({ id: uid }, { keepSessionInfo: true }, (err) => {
+            if (err) return next(err);
+            req.session.devReturnUid = back;
+            DeviceSession.create({ uid, sid: req.sessionID, ip: clientIp(req), ua: String(req.headers["user-agent"] || "").slice(0, 200) }).catch(() => {});
+            res.json({ ok: true });
+        });
+    };
+    app.get("/api/dev/state", (req, res) => {
+        res.json({ impersonating: !!(req.user && req.session && req.session.devReturnUid) });
+    });
+    app.post("/api/dev/login-as/:uid", async (req, res, next) => {
+        if (!req.user || !isOwnerUid(req.user.id)) return res.status(403).json({ error: "غير مصرح" });
+        const t = await Account.findOne({ uid: String(req.params.uid), status: "approved" }, { uid: 1, isOwner: 1 }).lean();
+        if (!t) return res.status(404).json({ error: "الحساب غير موجود أو غير مقبول" });
+        if (t.isOwner) return res.status(400).json({ error: "هذا حساب المالك" });
+        devLogin(req, res, next, t.uid, true);
+    });
+    app.post("/api/dev/return-owner", async (req, res, next) => {
+        const back = req.session && req.session.devReturnUid;
+        if (!req.user || !back) return res.status(400).json({ error: "ما أنت داخل بحساب تجربة" });
+        const o = await Account.findOne({ uid: back, isOwner: true, status: "approved" }, { uid: 1 }).lean();
+        if (!o) return res.status(404).json({ error: "حساب المالك غير موجود" });
+        devLogin(req, res, next, o.uid, false);
+    });
+}
 app.use("/api", (req, res, next) => {
     const h = req.headers["x-flash-as"];
     if (!h || !req.user || !isOwnerUid(req.user.id)) return next();
@@ -14698,6 +14762,33 @@ async function devDoRollback() {
     } catch (e) { toast(e.message); }
 }
 
+function devLoginBtn(uid) {
+    return window.IS_DEV ? '<button class="btn sm" style="background:#16a34a;color:#fff;" data-uid="' + spEsc(uid) + '" onclick="devLoginAs(this.dataset.uid)">🔑 دخول الحساب</button>' : '';
+}
+async function devLoginAs(uid) {
+    if (!(await confirmModal('🔑 بتدخل على هذا الحساب مباشرة، وتقدر ترجع لحسابك من زر «رجوع لحساب المالك». تكمل؟'))) return;
+    try {
+        await api('/api/dev/login-as/' + encodeURIComponent(uid), { method: 'POST', noLock: true });
+        location.reload();
+    } catch (e) { toast(e.message); }
+}
+async function devCheckImpersonation() {
+    try {
+        var r = await fetch('/api/dev/state', { cache: 'no-store' });
+        if (!r.ok) return;
+        var d = await r.json();
+        if (!d.impersonating || document.getElementById('dev-return-btn')) return;
+        var b = document.createElement('button');
+        b.id = 'dev-return-btn'; b.className = 'btn'; b.textContent = '↩️ رجوع لحساب المالك';
+        b.style.cssText = 'position:fixed;bottom:16px;right:16px;z-index:99998;background:#dc2626;color:#fff;box-shadow:0 4px 14px rgba(0,0,0,.5);';
+        b.onclick = async function () {
+            try { await api('/api/dev/return-owner', { method: 'POST', noLock: true }); location.reload(); } catch (e) { toast(e.message); }
+        };
+        document.body.appendChild(b);
+    } catch (e) {}
+}
+if (window.IS_DEV) setTimeout(devCheckImpersonation, 1500);
+
 async function offaOpenDevices() {
     ccStopLive();
     ownerModalOpen('📱 الأجهزة المتصلة', '<div style="color:var(--muted);">جارِ التحميل...</div>');
@@ -18250,6 +18341,7 @@ async function searchPersonnel() {
                     <div style="font-size:13px;color:#94a3b8;">النقاط: \${p.points} \${p.isBlocked ? '• 🚫 موقوف' : ''} • رقم البطاقة: \${p.cardNumber || '-'}</div>
                 </div>
                 <div class="row" style="gap:6px;">
+                    \${devLoginBtn(p.discord)}
                     <button class="btn sm gray" onclick="openCardModal('\${p.discord}')">🪪 البطاقة</button>
                     <button class="btn sm gray" onclick="toggleEdit(\${i})">تعديل</button>
                     <button class="btn sm gray" onclick="addNote('\${p.discord}')">ملاحظة</button>
