@@ -75,7 +75,7 @@ const CONFIG = {
     MONGO_URI: process.env.MONGO_URI || "",
 
     SITE_NAME: __DEV_MODE__ ? "فلاش المطورين" : "فلاش",
-    SITE_URL: process.env.SITE_URL || (process.env.DISCORD_CALLBACK_URL ? process.env.DISCORD_CALLBACK_URL.replace(/\/auth\/discord\/callback.*$/, "") : "https://flash1-gtsp.onrender.com"),
+    SITE_URL: process.env.SITE_URL || (process.env.DISCORD_CALLBACK_URL ? process.env.DISCORD_CALLBACK_URL.replace(/\/auth\/discord\/callback.*$/, "") : "https://flash-gpeb.onrender.com"),
     SESSION_SECRET: process.env.SESSION_SECRET || "غيّر_هذا_السر_2026",
     PORT: process.env.PORT || 7700,
 
@@ -3108,11 +3108,28 @@ app.post("/api/fraud/alerts/:id/resolve", ensureFraudViewer, async (req, res) =>
 // ===================== 📜 الشهادات الرسمية بباركود تحقق =====================
 // تصدر: كبار المسؤولين/المالك، القيادة العليا، قادة ونواب القطاعات، الشرطة العسكرية. العسكري ما يطلعها لنفسه (إلا الكبار).
 // الشهادة تنسجل بملف العسكري، ولكل من يقدر يصدر يقدر يشيلها (تصير "ملغاة" وتختفي من ملفه ويظهر ذلك بصفحة التحقق).
-const CERT_KINDS = { service: "شهادة خدمة", points: "كشف نقاط" };
+const CERT_KINDS = {
+    thanks: "شهادة شكر وتقدير", trainer: "شهادة مدرب", trainee: "شهادة متدرب", excellence: "شهادة تميز وانضباط",
+    promotion: "شهادة ترقية", conduct: "شهادة حسن سيرة وسلوك", course: "شهادة إتمام دورة", participation: "شهادة مشاركة ومهمة"
+};
+// الأنواع القديمة (ما تنصدر بعد اليوم) نخليها بس عشان الشهادات اللي انصدرت قبل تبقى تنعرض وتنسحب عادي
+const CERT_LEGACY = { service: "شهادة خدمة", points: "كشف نقاط" };
+const CERT_LABEL = Object.assign({}, CERT_LEGACY, CERT_KINDS);
+// وصف وتفاصيل كل نوع: lead = نص الشهادة، noteLabel = عنوان خانة التفاصيل (اللي يكتبها المصدِر)
+const CERT_META = {
+    thanks: { lead: "تتقدم إدارة السيرفر بجزيل الشكر والتقدير للعسكري المذكور بياناته أدناه، نظير جهوده المخلصة وعطائه المتميز في خدمة السيرفر:", noteLabel: "سبب الشكر" },
+    trainer: { lead: "تشهد إدارة السيرفر بأن العسكري المذكور بياناته أدناه يحمل صفة (مدرب) معتمد لدينا، وقد مُنح هذه الشهادة تقديراً لكفاءته في تدريب منسوبي السيرفر:", noteLabel: "مجال التدريب" },
+    trainee: { lead: "تشهد إدارة السيرفر بأن العسكري المذكور بياناته أدناه التحق بالبرنامج التدريبي واجتازه بنجاح، وقد مُنح صفة (متدرب) معتمد:", noteLabel: "البرنامج التدريبي" },
+    excellence: { lead: "تمنح إدارة السيرفر هذه الشهادة للعسكري المذكور بياناته أدناه تقديراً لتميّزه وانضباطه والتزامه بالأنظمة والتعليمات:", noteLabel: "أبرز ما تميز به" },
+    promotion: { lead: "تشهد إدارة السيرفر بأن العسكري المذكور بياناته أدناه تمت ترقيته وفق الضوابط المعتمدة، وهو يحمل الرتبة التالية حتى تاريخ الإصدار:", noteLabel: "ملاحظات الترقية" },
+    conduct: { lead: "تشهد إدارة السيرفر بأن العسكري المذكور بياناته أدناه ذو سيرة حسنة وسلوك قويم أثناء فترة خدمته لدينا:", noteLabel: "ملاحظات" },
+    course: { lead: "تشهد إدارة السيرفر بأن العسكري المذكور بياناته أدناه أتمّ الدورة التالية بنجاح واستحق هذه الشهادة:", noteLabel: "اسم الدورة" },
+    participation: { lead: "تشهد إدارة السيرفر بأن العسكري المذكور بياناته أدناه شارك مشاركة فعّالة في المهمة / الفعالية التالية:", noteLabel: "المهمة أو الفعالية" },
+};
 const CERT_DEFAULTS = { presName: "عبدالعزيز السهلي", presTitle: "رئيس السيرفر", vpName: "مهيدي القحطاني", vpTitle: "نائب رئيس السيرفر" };
 const CertSchema = new mongoose.Schema({
     code: { type: String, unique: true, index: true },
-    kind: { type: String, enum: ["service", "points"], default: "service" },
+    kind: { type: String, default: "thanks" },
     targetDiscord: { type: String, index: true },
     data: { type: mongoose.Schema.Types.Mixed, default: {} },
     issuedBy: String, issuedByName: String, issuedByRole: String,
@@ -3150,14 +3167,14 @@ async function ensureCertIssuer(req, res, next) {
     next();
 }
 function certPublic(c) {
-    return { code: c.code, kind: c.kind, kindLabel: CERT_KINDS[c.kind] || c.kind, targetDiscord: c.targetDiscord, name: (c.data || {}).name, rank: (c.data || {}).rank,
+    return { code: c.code, kind: c.kind, kindLabel: CERT_LABEL[c.kind] || c.kind, targetDiscord: c.targetDiscord, name: (c.data || {}).name, rank: (c.data || {}).rank,
         issuedByName: c.issuedByName, issuedByRole: c.issuedByRole, status: c.status, createdAt: c.createdAt, revokedByName: c.revokedByName, revokedAt: c.revokedAt };
 }
 async function certListFor(discord) {
     const list = await Certificate.find({ targetDiscord: discord, status: "active" }).sort({ createdAt: -1 }).limit(100).lean();
     return list.map(certPublic);
 }
-async function certBuildData(p, settings) {
+async function certBuildData(p, settings, note) {
     const [acc, approved, progress] = await Promise.all([
         Account.findOne({ uid: p.discord }, { createdAt: 1 }).lean(),
         Violation.countDocuments({ reporterDiscord: p.discord, status: "approved" }),
@@ -3169,6 +3186,7 @@ async function certBuildData(p, settings) {
         nextRank: progress.nextRank || null, remaining: progress.remaining || 0,
         serviceStart: (acc && acc.createdAt) || p.createdAt || new Date(), approvedViolations: approved,
         warnings: (p.warnings || []).filter(w => (w.kind || "warning") === "warning").length,
+        note: note || "",
     };
 }
 
@@ -3192,6 +3210,7 @@ app.get("/api/certs/recent", ensureCertIssuer, async (req, res) => {
 });
 app.post("/api/certs/issue", ensureCertIssuer, async (req, res) => {
     const { discord, kind } = req.body || {};
+    const note = String((req.body || {}).note || "").trim().slice(0, 120);
     if (!CERT_KINDS[kind]) return res.status(400).json({ error: "نوع الشهادة غير صحيح" });
     if (!discord || typeof discord !== "string") return res.status(400).json({ error: "حدد العسكري" });
     if (discord === req.user.id && !isSeniorAdmin(req.user.id)) return res.status(403).json({ error: "ما تقدر تصدر شهادة لنفسك — لازم غيرك من القيادة يصدرها لك" });
@@ -3199,7 +3218,7 @@ app.post("/api/certs/issue", ensureCertIssuer, async (req, res) => {
     const p = await Personnel.findOne({ discord });
     if (!p || !p.registeredName) return res.status(404).json({ error: "العسكري غير موجود أو ما أكمل بياناته" });
     const settings = req.settings;
-    const data = await certBuildData(p, settings);
+    const data = await certBuildData(p, settings, note);
     const me = await Personnel.findOne({ discord: req.user.id }, { registeredName: 1 }).lean();
     const issuedByName = isSeniorAdmin(req.user.id) ? "كبار المسؤولين" : ((me && me.registeredName) || req.user.username);
     let c = null;
@@ -3221,7 +3240,7 @@ app.post("/api/certs/:code/revoke", ensureCertIssuer, async (req, res) => {
     c.status = "revoked"; c.revokedBy = req.user.id; c.revokedAt = new Date();
     c.revokedByName = isSeniorAdmin(req.user.id) ? "كبار المسؤولين" : ((me && me.registeredName) || req.user.username);
     await c.save();
-    await logEvent({ action: "سحب شهادة", discordId: c.targetDiscord, actorId: req.user.id, actorTag: req.user.username, details: (CERT_KINDS[c.kind] || "") + " (" + c.code + ") — " + ((c.data || {}).name || "") });
+    await logEvent({ action: "سحب شهادة", discordId: c.targetDiscord, actorId: req.user.id, actorTag: req.user.username, details: (CERT_LABEL[c.kind] || "") + " (" + c.code + ") — " + ((c.data || {}).name || "") });
     res.json({ ok: true });
 });
 // توقيعات وأختام رئيس ونائب رئيس السيرفر (المالك فقط): صور PNG/JPG/WEBP أو أسماء
@@ -3264,27 +3283,35 @@ function certStampSvg(title, color) {
 }
 function certAssetImg(src, h) { return '<img src="' + src + '" style="max-height:' + h + 'px;max-width:190px;object-fit:contain;mix-blend-mode:multiply;">'; }
 
-function certPageHtml(c, assets, forPrint) {
+function certPageHtml(c, assets, forPrint, baseUrl) {
     assets = assets || {};
-    const d = c.data || {}, kindLbl = CERT_KINDS[c.kind] || "شهادة";
+    const d = c.data || {}, kindLbl = CERT_LABEL[c.kind] || "شهادة";
     const presName = assets.presName || CERT_DEFAULTS.presName, vpName = assets.vpName || CERT_DEFAULTS.vpName;
-    const url = CONFIG.SITE_URL.replace(/\/+$/, "") + "/verify/" + c.code;
+    const url = String(baseUrl || CONFIG.SITE_URL).replace(/\/+$/, "") + "/verify/" + c.code;
     const qr = FlashQR.svg(url, { size: 120, color: "#0b1f4a" }) || FlashQR.svg(c.code, { size: 120, color: "#0b1f4a" });
     const row = (k, v) => '<tr><td class="k">' + k + '</td><td>' + certEsc(v) + '</td></tr>';
-    const body = c.kind === "points"
-        ? '<p class="lead">تشهد إدارة السيرفر بأن العسكري المذكور بياناته أدناه يملك الرصيد التالي من النقاط حتى تاريخ الإصدار:</p><table>' +
+    const meta = CERT_META[c.kind];
+    let body;
+    if (meta) {
+        body = '<p class="lead">' + certEsc(meta.lead) + '</p><table>' +
+            row("الاسم", d.name) + row("رقم البطاقة", d.cardNumber) + row("الرتبة", d.rank) + row("اليونت", d.unit) + (d.sector ? row("القطاع", d.sector) : "") +
+            (d.note ? row(meta.noteLabel, d.note) : "") + row("تاريخ الإصدار", certDate(c.createdAt)) + '</table>';
+    } else if (c.kind === "points") {
+        body = '<p class="lead">تشهد إدارة السيرفر بأن العسكري المذكور بياناته أدناه يملك الرصيد التالي من النقاط حتى تاريخ الإصدار:</p><table>' +
           row("الاسم", d.name) + row("رقم البطاقة", d.cardNumber) + row("الرتبة الحالية", d.rank) + row("اليونت", d.unit) + (d.sector ? row("القطاع", d.sector) : "") +
           row("رصيد النقاط", d.points) + (d.nextRank ? row("الرتبة التالية", d.nextRank + " (المتبقي " + d.remaining + " نقطة)") : row("الرتبة التالية", "وصل لأعلى رتبة")) +
-          row("المخالفات المقبولة", d.approvedViolations) + row("عدد التحذيرات", d.warnings) + '</table>'
-        : '<p class="lead">تشهد إدارة السيرفر بأن العسكري المذكور بياناته أدناه منسوب للخدمة لدينا، وقد مُنح هذه الشهادة بناءً على سجل خدمته:</p><table>' +
+          row("المخالفات المقبولة", d.approvedViolations) + row("عدد التحذيرات", d.warnings) + '</table>';
+    } else {
+        body = '<p class="lead">تشهد إدارة السيرفر بأن العسكري المذكور بياناته أدناه منسوب للخدمة لدينا، وقد مُنح هذه الشهادة بناءً على سجل خدمته:</p><table>' +
           row("الاسم", d.name) + row("رقم البطاقة", d.cardNumber) + row("الرتبة", d.rank) + row("اليونت", d.unit) + (d.sector ? row("القطاع", d.sector) : "") +
           row("تاريخ الالتحاق بالخدمة", certDate(d.serviceStart)) + row("رصيد النقاط", d.points) + row("المخالفات المقبولة", d.approvedViolations) + '</table>';
+    }
     const revoked = c.status === "revoked";
     return '<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex">' +
         '<title>' + certEsc(kindLbl) + ' — ' + certEsc(d.name) + '</title>' +
         '<link rel="preconnect" href="https://fonts.googleapis.com"><link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;500;700;800&display=swap" rel="stylesheet">' +
         '<style>@page{size:A4;margin:0}*{box-sizing:border-box}html,body{margin:0;background:#e5e7eb;font-family:Tajawal,Cairo,"Segoe UI",Tahoma,Arial,sans-serif;-webkit-print-color-adjust:exact;print-color-adjust:exact}' +
-        '.bar{position:sticky;top:0;z-index:5;background:#0b1f4a;color:#fff;padding:10px 16px;display:flex;gap:10px;align-items:center;justify-content:space-between}.bar button{background:#c9a227;color:#0b1f4a;border:0;border-radius:8px;padding:9px 16px;font:700 15px Tajawal,sans-serif;cursor:pointer}' +
+        '.bar{position:sticky;top:0;z-index:5;background:#0b1f4a;color:#fff;padding:10px 16px;display:flex;gap:10px;align-items:center;justify-content:space-between}.bar button.back{background:transparent;color:#fff;border:1.5px solid #c9a227}.bar button{background:#c9a227;color:#0b1f4a;border:0;border-radius:8px;padding:9px 16px;font:700 15px Tajawal,sans-serif;cursor:pointer}' +
         '.page{width:210mm;min-height:297mm;margin:16px auto;background:#fffdf7;position:relative;padding:14mm;box-shadow:0 6px 30px rgba(0,0,0,.25)}' +
         '.frame{border:3px solid #0b1f4a;outline:1.5px solid #c9a227;outline-offset:-9px;min-height:269mm;padding:12mm 12mm 10mm;position:relative;display:flex;flex-direction:column}' +
         '.hd{text-align:center;border-bottom:2px solid #c9a227;padding-bottom:10px}.hd .org{font-size:26px;font-weight:800;color:#0b1f4a}.hd .sub{font-size:13px;color:#6b7280;margin-top:2px}' +
@@ -3295,7 +3322,7 @@ function certPageHtml(c, assets, forPrint) {
         '.meta{margin-top:12px;border-top:1px dashed #c9a227;padding-top:8px;font-size:12px;color:#4b5563;display:flex;justify-content:space-between;flex-wrap:wrap;gap:6px}' +
         '.wm{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:150px;font-weight:800;color:rgba(220,38,38,.18);transform:rotate(-25deg);pointer-events:none}' +
         '@media print{html,body{background:#fff}.bar{display:none}.page{margin:0;box-shadow:none}}@media(max-width:820px){.page{width:100%;min-height:0;padding:6px;margin:0}.frame{padding:14px}.title{font-size:28px}table{font-size:14px}.sigs{flex-wrap:wrap}.sig,.qr{width:48%}}</style></head><body>' +
-        (forPrint === false ? "" : '<div class="bar"><span>📜 ' + certEsc(kindLbl) + '</span><button onclick="window.print()">🖨️ طباعة / حفظ PDF</button></div>') +
+        (forPrint === false ? "" : '<div class="bar"><button class="back" onclick="if(history.length>1){history.back()}else{location.href=\'/?go=certs\'}">↩️ رجوع</button><span>📜 ' + certEsc(kindLbl) + '</span><button onclick="window.print()">🖨️ طباعة / حفظ PDF</button></div>') +
         '<div class="page"><div class="frame">' + (revoked ? '<div class="wm">ملغاة</div>' : '') +
         '<div class="hd"><div class="org">' + certEsc(CONFIG.SITE_NAME) + '</div><div class="sub">الإدارة العامة للسيرفر — وثيقة رسمية</div></div>' +
         '<div class="title">' + certEsc(kindLbl) + '</div><div class="no">رقم الوثيقة: <b dir="ltr">' + certEsc(c.code) + '</b></div>' + body +
@@ -3305,6 +3332,17 @@ function certPageHtml(c, assets, forPrint) {
         '<div class="sig"><div class="box"><div class="st">' + (assets.presStamp ? certAssetImg(assets.presStamp, 100) : certStampSvg(CERT_DEFAULTS.presTitle, "#1d3a8a")) + '</div>' + (assets.presSig ? certAssetImg(assets.presSig, 70) : certSigSvg(1)) + '</div><div class="nm">' + certEsc(presName) + '</div><div class="tt">' + certEsc(CERT_DEFAULTS.presTitle) + '</div></div>' +
         '</div><div class="meta"><span>تاريخ الإصدار: ' + certDate(c.createdAt) + '</span><span>أصدرها: ' + certEsc(c.issuedByRole || "") + '</span><span dir="ltr">' + certEsc(url) + '</span></div>' +
         '</div></div></body></html>';
+}
+// رابط الموقع الحقيقي من الطلب نفسه (عشان الباركود دايم يفتح موقع فلاش اللي انفتحت منه الشهادة)
+function certBaseUrl(req) {
+    try {
+        const host = String(req.get("x-forwarded-host") || req.get("host") || "").split(",")[0].trim();
+        if (host && /^[a-z0-9.\-]+(:\d+)?$/i.test(host)) {
+            const proto = /localhost|127\.0\.0\.1/.test(host) ? "http" : "https";
+            return proto + "://" + host;
+        }
+    } catch (e) {}
+    return CONFIG.SITE_URL;
 }
 async function certAssetsNow() { try { return (await getSettings()).certAssets || {}; } catch (e) { return {}; } }
 // عرض الشهادة للطباعة/PDF: صاحبها أو من يقدر يصدر
@@ -3316,7 +3354,7 @@ app.get("/cert/:code", async (req, res) => {
         if (!c) return res.status(404).send("الشهادة غير موجودة");
         if (c.targetDiscord !== req.user.id && !(await certIssuerRole(req.user.id))) return res.status(403).send("غير مصرح");
         if (c.status === "revoked" && c.targetDiscord === req.user.id && !(await certIssuerRole(req.user.id))) return res.status(404).send("هذي الشهادة تم سحبها");
-        res.set("Cache-Control", "no-store").type("html").send(certPageHtml(c, await certAssetsNow()));
+        res.set("Cache-Control", "no-store").type("html").send(certPageHtml(c, await certAssetsNow(), true, certBaseUrl(req)));
     } catch (e) { res.status(500).send("خطأ"); }
 });
 // صفحة التحقق العامة (يفتحها أي أحد يمسح الباركود)
@@ -3330,7 +3368,7 @@ app.get("/verify/:code", async (req, res) => {
     else if (c.status === "revoked") { status = "ملغاة"; color = "#b45309"; icon = "⚠️"; msg = "هذي الوثيقة كانت صادرة ثم تم سحبها، ولا يُعتدّ بها."; }
     else { status = "سارية وصحيحة"; color = "#15803d"; icon = "✅"; msg = "هذي الوثيقة صادرة رسمياً من " + CONFIG.SITE_NAME + " ومسجّلة في ملف العسكري."; }
     const row = (k, v) => '<div class="r"><span>' + k + '</span><b>' + certEsc(v) + '</b></div>';
-    const details = c ? row("نوع الوثيقة", CERT_KINDS[c.kind] || "-") + row("اسم العسكري", d.name || "-") + row("الرتبة وقت الإصدار", d.rank || "-") + row("اليونت", d.unit || "-") +
+    const details = c ? row("نوع الوثيقة", CERT_LABEL[c.kind] || "-") + row("اسم العسكري", d.name || "-") + row("الرتبة وقت الإصدار", d.rank || "-") + row("اليونت", d.unit || "-") +
         row("تاريخ الإصدار", certDate(c.createdAt)) + row("جهة الإصدار", c.issuedByRole || "-") + row("رقم الوثيقة", c.code) + (c.status === "revoked" ? row("تاريخ السحب", certDate(c.revokedAt)) : "") : "";
     res.set("Cache-Control", "no-store").type("html").send('<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex"><title>التحقق من الوثيقة</title>' +
         '<link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;700;800&display=swap" rel="stylesheet"><style>*{box-sizing:border-box}body{margin:0;background:#0b1f4a;font-family:Tajawal,Cairo,"Segoe UI",Tahoma,Arial,sans-serif;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:16px}' +
@@ -10810,12 +10848,14 @@ app.post("/api/owner/att/remove-absence", ensureSeniorAdmin, async (req, res) =>
     if (!Number.isFinite(dayKey)) return res.status(400).json({ error: "حدد الاستلام" });
     const mode = b.mode === "all" ? "all" : b.mode === "except" ? "except" : null;
     if (!mode) return res.status(400).json({ error: "حدد الكل أو مستثنى" });
-    const except = new Set(mode === "except" && Array.isArray(b.exceptUids) ? b.exceptUids.map(String) : []);
+    // الكل = ينشال الغياب عن كل الغايبين • مستثنى = الغياب يثبت على الجميع، وينشال بس عن الأشخاص اللي تختارهم
+    const picked = new Set(mode === "except" && Array.isArray(b.exceptUids) ? b.exceptUids.map(String) : []);
     const rd = await RecDay.findOne({ dayKey }).lean();
     if (!rd || rd.status === "open") return res.status(409).json({ error: "الاستلام ما انسكّر بعد" });
     const OK = ["none", "pending", "rejected"];
     const rows = await RecRow.find({ dayKey, kind: "absent", excuseStatus: { $in: OK } }, { uid: 1 }).limit(5000).lean();
-    const targets = rows.filter(r => !except.has(r.uid));
+    if (mode === "except" && !picked.size) return res.status(400).json({ error: "حدد الأشخاص اللي تبي ينشال غيابهم" });
+    const targets = mode === "except" ? rows.filter(r => picked.has(String(r.uid))) : rows;
     if (!targets.length) return res.status(400).json({ error: "ما فيه غايبين تنشال عنهم" });
     const now = new Date();
     const byName = await cyName(req.user.id);
@@ -10841,7 +10881,7 @@ app.post("/api/owner/att/remove-absence", ensureSeniorAdmin, async (req, res) =>
             done.push({ uid: old.uid, name: old.name, ded });
         } catch (e) { console.error("❌ فشل إزالة غياب:", e.message); }
     }
-    await logEvent({ action: "إزالة غياب", actorId: req.user.id, actorTag: req.user.username, details: "أُزيل الغياب عن " + removed + " (رجعت " + refundedTotal + " نقطة)" + (except.size ? " • مستثنى " + except.size : "") });
+    await logEvent({ action: "إزالة غياب", actorId: req.user.id, actorTag: req.user.username, details: "أُزيل الغياب عن " + removed + " (رجعت " + refundedTotal + " نقطة)" + (mode === "except" ? " • بالاختيار" : " • الكل") });
     (async () => {
         for (const x of done) {
             const text = "🧹 تم إزالة غيابك عن الاستلام" + (x.ded ? " ورجعت لك " + x.ded + " نقطة" : "") + " — وانسجّل في ملفك.";
@@ -10849,7 +10889,7 @@ app.post("/api/owner/att/remove-absence", ensureSeniorAdmin, async (req, res) =>
             pushUid(x.uid, { title: CONFIG.SITE_NAME, body: text.slice(0, 120), ttl: 86400, tag: "rmabs-" + dayKey }).catch(() => {});
         }
     })();
-    res.json({ ok: true, removed, refunded: refundedTotal, skipped: except.size });
+    res.json({ ok: true, removed, refunded: refundedTotal, skipped: mode === "except" ? Math.max(0, rows.length - targets.length) : 0 });
 });
 
 // ---------- مسؤولو الاستلامات + زر فتح استلام ----------
@@ -17503,7 +17543,7 @@ function attExBadge(x) {
     if (x.excuseStatus === 'rejected') return ' <span class="badge rejected">❌ عذر مرفوض</span>';
     return '';
 }
-var ATTRM = { mode: 'all', ex: {}, list: [] };
+var ATTRM = { mode: 'all', ex: {}, list: [] }; // ex = الأشخاص اللي ينشال غيابهم (بوضع مستثنى)
 function attRmOpen() {
     var d = ATTP.data.absent;
     if (!ME || !ME.isOwner || !d || !d.reception) return;
@@ -17521,18 +17561,18 @@ function attRmPaint() {
     var exN = 0;
     st.list.forEach(function (x) { if (st.ex[x.uid]) exN++; });
     var isEx = st.mode === 'except';
-    var n = isEx ? st.list.length - exN : st.list.length;
+    var n = isEx ? exN : st.list.length;
     var rows = st.list.map(function (x) {
-        var ex = isEx && st.ex[x.uid];
+        var ex = isEx && st.ex[x.uid]; // ex = انختار ينشال غيابه
         var tog = isEx ? ' data-u="' + cyEsc(x.uid) + '" onclick="attRmTog(this.dataset.u)"' : '';
-        return '<div class="card" style="padding:8px 12px;margin-top:6px;' + (isEx ? 'cursor:pointer;' : '') + (ex ? 'opacity:0.55;' : '') + '"' + tog + '><div class="row"><div><b>' + cyEsc(x.name) + '</b><div style="font-size:12px;color:var(--muted);margin-top:3px;">' + attMeta(x) + '</div></div>' +
-            '<span style="font-size:12px;">' + (ex ? '🔒 مستثنى (يبقى غيابه)' : '🧹 ينشال غيابه') + '</span></div></div>';
+        return '<div class="card" style="padding:8px 12px;margin-top:6px;' + (isEx ? 'cursor:pointer;' : '') + (isEx && !ex ? 'opacity:0.55;' : '') + '"' + tog + '><div class="row"><div><b>' + cyEsc(x.name) + '</b><div style="font-size:12px;color:var(--muted);margin-top:3px;">' + attMeta(x) + '</div></div>' +
+            '<span style="font-size:12px;">' + (isEx ? (ex ? '🧹 ينشال غيابه' : '🔒 يثبت غيابه') : '🧹 ينشال غيابه') + '</span></div></div>';
     }).join('');
     box.innerHTML = '<h3>🧹 إزالة الغياب (' + st.list.length + ' غايب)</h3>' +
         '<div class="row" style="justify-content:flex-start;gap:6px;margin:8px 0;">' +
             '<button class="btn sm ' + (isEx ? 'gray' : '') + '" data-m="all" onclick="attRmMode(this.dataset.m)">الكل</button>' +
             '<button class="btn sm ' + (isEx ? '' : 'gray') + '" data-m="except" onclick="attRmMode(this.dataset.m)">مستثنى</button></div>' +
-        '<div style="font-size:12px;color:var(--muted);margin-bottom:6px;">' + (isEx ? 'اضغط على اللي تبي تستثنيهم (يبقى غيابهم)، والباقي ينشال عنهم الغياب وترجع نقاطهم.' : 'بينشال الغياب عن كل الغايبين وترجع نقاطهم، وينسجّل في ملفاتهم.') + '</div>' +
+        '<div style="font-size:12px;color:var(--muted);margin-bottom:6px;">' + (isEx ? 'الغياب يثبت على الجميع. اضغط على الشخص اللي تبي تستثنيه من الغياب (ينشال غيابه وترجع نقاطه).' : 'بينشال الغياب عن كل الغايبين وترجع نقاطهم، وينسجّل في ملفاتهم.') + '</div>' +
         '<div style="max-height:45vh;overflow-y:auto;">' + rows + '</div>' +
         '<div class="wf-actions"><button class="btn gray sm" onclick="closeWarnForm()">إلغاء</button><button class="btn sm" onclick="attRmGo()">تأكيد الإزالة (' + n + ')</button></div>';
 }
@@ -17541,8 +17581,8 @@ async function attRmGo() {
     if (!d || !d.reception) return;
     var exc = Object.keys(st.ex).filter(function (k) { return st.ex[k]; });
     var isEx = st.mode === 'except';
-    var n = isEx ? st.list.length - exc.length : st.list.length;
-    if (n <= 0) { toast('كل الغايبين مستثنين — ما فيه شي ينشال'); return; }
+    var n = isEx ? exc.length : st.list.length;
+    if (n <= 0) { toast('اختر شخص واحد على الأقل ينشال غيابه'); return; }
     if (!(await confirmModal('تبي تشيل الغياب عن ' + n + ' شخص؟ بترجع نقاطهم وينسجّل في ملفاتهم.'))) return;
     try {
         var r = await api('/api/owner/att/remove-absence', { method: 'POST', body: JSON.stringify({ dayKey: d.reception.dayKey, mode: st.mode, exceptUids: isEx ? exc : [] }) });
@@ -17793,11 +17833,26 @@ function frBadgeHtml(v) {
 
 // ---------- الشهادات ----------
 var CERT_TM = null, CERT_SEL = null, CERT_SF = null;
-function certKindLbl(k) { return k === 'points' ? 'كشف نقاط' : 'شهادة خدمة'; }
+var CERT_UI = [
+    ['thanks', '🏅', 'شكر وتقدير', 'سبب الشكر (اختياري)'],
+    ['trainer', '🎓', 'مدرب', 'مجال التدريب (اختياري)'],
+    ['trainee', '📘', 'متدرب', 'البرنامج التدريبي (اختياري)'],
+    ['excellence', '⭐', 'تميز وانضباط', 'أبرز ما تميز به (اختياري)'],
+    ['promotion', '🎖️', 'ترقية', 'ملاحظات الترقية (اختياري)'],
+    ['conduct', '🛡️', 'حسن سيرة وسلوك', 'ملاحظات (اختياري)'],
+    ['course', '📜', 'إتمام دورة', 'اسم الدورة (اختياري)'],
+    ['participation', '🤝', 'مشاركة ومهمة', 'المهمة أو الفعالية (اختياري)']
+];
+function certKindLbl(k) {
+    if (k === 'points') return 'كشف نقاط';
+    if (k === 'service') return 'شهادة خدمة';
+    for (var i = 0; i < CERT_UI.length; i++) if (CERT_UI[i][0] === k) return 'شهادة ' + CERT_UI[i][2];
+    return 'شهادة';
+}
 function certRowHtml(c, canRevoke) {
     var dt = new Date(c.createdAt).toLocaleDateString('ar-SA');
     return '<div style="background:rgba(5,15,10,0.6);padding:10px;border-radius:8px;margin-top:6px;font-size:13px;display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;align-items:center;">' +
-        '<div><b>' + certKindLbl(c.kind) + '</b>' + (c.name ? ' — ' + accEsc(c.name) : '') + '<div style="color:var(--muted);font-size:12px;">' + dt + ' • ' + accEsc(c.issuedByRole || '') + ' • <span dir="ltr">' + accEsc(c.code) + '</span>' +
+        '<div><b>' + accEsc(c.kindLabel || certKindLbl(c.kind)) + '</b>' + (c.name ? ' — ' + accEsc(c.name) : '') + '<div style="color:var(--muted);font-size:12px;">' + dt + ' • ' + accEsc(c.issuedByRole || '') + ' • <span dir="ltr">' + accEsc(c.code) + '</span>' +
         (c.status === 'revoked' ? ' • <span style="color:#f87171;">ملغاة</span>' : '') + '</div></div>' +
         '<div style="display:flex;gap:6px;">' + (c.status === 'revoked' && !canRevoke ? '' : '<a class="btn sm" target="_blank" href="/cert/' + accEsc(c.code) + '">📄 عرض / PDF</a>') +
         (canRevoke && c.status !== 'revoked' ? '<button class="btn danger sm" data-c="' + accEsc(c.code) + '" onclick="certRevoke(this.dataset.c)">🗑️ سحب</button>' : '') + '</div></div>';
@@ -17850,7 +17905,8 @@ async function certPick(discord, name) {
     var box = document.getElementById('cert-sel');
     if (!box) return;
     box.innerHTML = '<div style="margin-top:12px;"><b>' + accEsc(name) + '</b></div>' +
-        '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px;"><button class="btn sm" data-k="service" onclick="certIssue(this.dataset.k)">📜 إصدار شهادة خدمة</button><button class="btn sm" data-k="points" onclick="certIssue(this.dataset.k)">⭐ إصدار كشف نقاط</button></div>' +
+        '<input id="cert-note" maxlength="120" placeholder="تفاصيل تنكتب في الشهادة (اختياري): سبب الشكر / اسم الدورة / المجال..." style="margin-top:8px;">' +
+        '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px;">' + CERT_UI.map(function (k) { return '<button class="btn sm" data-k="' + k[0] + '" onclick="certIssue(this.dataset.k)">' + k[1] + ' ' + k[2] + '</button>'; }).join('') + '</div>' +
         '<div id="cert-member" style="margin-top:10px;">جارِ التحميل...</div>';
     certLoadMember();
 }
@@ -17863,7 +17919,7 @@ async function certLoadMember() {
 async function certIssue(kind) {
     if (!CERT_SEL) return;
     try {
-        var d = await api('/api/certs/issue', { method: 'POST', body: JSON.stringify({ discord: CERT_SEL, kind: kind }) });
+        var d = await api('/api/certs/issue', { method: 'POST', body: JSON.stringify({ discord: CERT_SEL, kind: kind, note: ((document.getElementById('cert-note') || {}).value || '').trim() }) });
         toast('✅ تم إصدار الشهادة وتسجيلها في ملفه');
         certLoadMember(); certLoadRecent();
         var box = document.getElementById('cert-member');
