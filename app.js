@@ -595,8 +595,14 @@ const ViolationSchema = new mongoose.Schema({
     drugType: { type: String, default: null },
     drugQuantity: { type: String, default: null },
     concealMethod: { type: String, default: null },
+
+    // كشف التلاعب
+    photoHash: { type: String, default: null, index: true },
+    photoPHash: { type: String, default: null },
+    fraudFlags: { type: [{ _id: false, type: { type: String }, label: String, detail: String, refId: String }], default: [] },
 });
 ViolationSchema.index({ status: 1, reviewedAt: -1 });
+ViolationSchema.index({ plateNumber: 1 });
 ViolationSchema.index({ reporterDiscord: 1, createdAt: -1 });
 const Violation = mongoose.model("Violation", ViolationSchema);
 
@@ -849,6 +855,7 @@ const SettingsSchema = new mongoose.Schema({
     supportCanned: { type: [{ title: String, text: String }], default: [] },
     attConfig: { type: mongoose.Schema.Types.Mixed, default: null },
     vapid: { type: mongoose.Schema.Types.Mixed, default: null },
+    certAssets: { type: mongoose.Schema.Types.Mixed, default: null },
 }, { minimize: false });
 const Settings = mongoose.model("Settings", SettingsSchema);
 
@@ -1257,6 +1264,7 @@ function buildViolationEmbed(v) {
             .setTitle(`🧪 تقرير مكافحة مخدرات جديد (${v.reportCategory || "-"}) — بانتظار المراجعة`)
             .setColor(0xf59e0b)
             .addFields(fields)
+            .addFields(...fraudFields(v))
             .setFooter({ text: `ID: ${v._id}` })
             .setTimestamp(v.createdAt);
     }
@@ -1270,6 +1278,7 @@ function buildViolationEmbed(v) {
             { name: "المركبة", value: v.vehicle, inline: true },
             { name: "لوحة السيارة", value: v.plateNumber, inline: true },
         )
+        .addFields(...fraudFields(v))
         .setFooter({ text: `ID: ${v._id}` })
         .setTimestamp(v.createdAt);
 }
@@ -2771,6 +2780,8 @@ app.get("/api/me", ensureAuth, async (req, res) => {
         deviceLocked: meDevLocked,
         unassigned: meUnassigned,
         isViolationsOfficer: isViolationsOfficer(req.user.id, settings),
+        canFraud: senior || isHighCommand(req.user.id, settings) || isViolationsOfficer(req.user.id, settings),
+        canIssueCert: !!(await certIssuerRole(req.user.id, settings)),
         sectorViolOfficer: getSectorViolOfficer(req.user.id, settings),
         sectorAttOfficer: getSectorAttOfficer(req.user.id, settings),
         canAttView: !!(sectorInfo && sectorInfo.role === "commander") || !!getSectorAttOfficer(req.user.id, settings) || isMilitaryPolice,
@@ -2799,6 +2810,533 @@ app.post("/api/profile/setup", ensureAuth, async (req, res) => {
 app.get("/api/violations/meta", ensureAuth, async (req, res) => {
     const vehicles = await Vehicle.find().sort({ name: 1 });
     res.json({ types: CONFIG.VIOLATION_TYPES, vehicles: vehicles.map(v => ({ name: v.name, photo: v.photo })) });
+});
+
+// ===================== مولّد QR داخلي (بدون مكتبات خارجية) — وضع Byte، تصحيح L/M، نسخ 1-6 =====================
+const FlashQR = (function () {
+    const ECC = { L: { fmt: 1, cw: [0, 7, 10, 15, 20, 26, 18], bl: [0, 1, 1, 1, 1, 1, 2] }, M: { fmt: 0, cw: [0, 10, 16, 26, 18, 24, 16], bl: [0, 1, 1, 1, 2, 2, 4] } };
+    function gmul(x, y) { let z = 0; for (let i = 7; i >= 0; i--) { z = (z << 1) ^ ((z >>> 7) * 0x11D); z ^= ((y >>> i) & 1) * x; } return z; }
+    function rsDiv(deg) {
+        const r = new Array(deg).fill(0); r[deg - 1] = 1; let root = 1;
+        for (let i = 0; i < deg; i++) { for (let j = 0; j < deg; j++) { r[j] = gmul(r[j], root); if (j + 1 < deg) r[j] ^= r[j + 1]; } root = gmul(root, 2); }
+        return r;
+    }
+    function rsRem(data, div) {
+        const r = new Array(div.length).fill(0);
+        for (const b of data) { const f = b ^ r.shift(); r.push(0); for (let i = 0; i < div.length; i++) r[i] ^= gmul(div[i], f); }
+        return r;
+    }
+    function rawModules(ver) {
+        let r = (16 * ver + 128) * ver + 64;
+        if (ver >= 2) { const n = Math.floor(ver / 7) + 2; r -= (25 * n - 10) * n - 55; }
+        return r;
+    }
+    function dataCw(ver, e) { return Math.floor(rawModules(ver) / 8) - e.cw[ver] * e.bl[ver]; }
+    function build(bytes, eccName) {
+        const e = ECC[eccName]; let ver = 0;
+        for (let v = 1; v <= 6; v++) { if (4 + 8 + 8 * bytes.length <= dataCw(v, e) * 8) { ver = v; break; } }
+        if (!ver) return null;
+        // 1) bits
+        const bits = [];
+        const put = (val, n) => { for (let i = n - 1; i >= 0; i--) bits.push((val >>> i) & 1); };
+        put(4, 4); put(bytes.length, 8); bytes.forEach(b => put(b, 8));
+        const cap = dataCw(ver, e) * 8;
+        put(0, Math.min(4, cap - bits.length));
+        while (bits.length % 8) bits.push(0);
+        for (let p = 0xEC; bits.length < cap; p ^= 0xEC ^ 0x11) put(p, 8);
+        const data = []; for (let i = 0; i < bits.length; i += 8) { let b = 0; for (let j = 0; j < 8; j++) b = (b << 1) | bits[i + j]; data.push(b); }
+        // 2) blocks + ecc + interleave
+        const nb = e.bl[ver], eccLen = e.cw[ver], raw = Math.floor(rawModules(ver) / 8);
+        const shortLen = Math.floor(raw / nb) - eccLen, numShort = nb - raw % nb;
+        const div = rsDiv(eccLen), blocks = []; let k = 0;
+        for (let i = 0; i < nb; i++) {
+            const len = shortLen + (i < numShort ? 0 : 1);
+            const d = data.slice(k, k + len); k += len;
+            const ec = rsRem(d, div);
+            if (i < numShort) d.push(0);
+            blocks.push(d.concat(ec));
+        }
+        const all = [];
+        for (let i = 0; i < blocks[0].length; i++) blocks.forEach((b, j) => { if (i !== shortLen || j >= numShort) all.push(b[i]); });
+        // 3) matrix
+        const size = ver * 4 + 17;
+        const m = [], fn = [];
+        for (let i = 0; i < size; i++) { m.push(new Array(size).fill(false)); fn.push(new Array(size).fill(false)); }
+        const setFn = (x, y, d) => { m[y][x] = d; fn[y][x] = true; };
+        for (let i = 0; i < size; i++) { setFn(6, i, i % 2 === 0); setFn(i, 6, i % 2 === 0); }
+        const finder = (cx, cy) => { for (let dy = -4; dy <= 4; dy++) for (let dx = -4; dx <= 4; dx++) { const x = cx + dx, y = cy + dy; if (x >= 0 && x < size && y >= 0 && y < size) { const d = Math.max(Math.abs(dx), Math.abs(dy)); setFn(x, y, d !== 2 && d !== 4); } } };
+        finder(3, 3); finder(size - 4, 3); finder(3, size - 4);
+        if (ver >= 2) {
+            const pos = [6, size - 7];
+            for (const i of pos) for (const j of pos) {
+                if ((i === 6 && j === 6) || (i === 6 && j === size - 7) || (i === size - 7 && j === 6)) continue;
+                for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++) setFn(i + dx, j + dy, Math.max(Math.abs(dx), Math.abs(dy)) !== 1);
+            }
+        }
+        const fmt = mask => {
+            const d = (e.fmt << 3) | mask; let rem = d;
+            for (let i = 0; i < 10; i++) rem = (rem << 1) ^ ((rem >>> 9) * 0x537);
+            const b = ((d << 10) | rem) ^ 0x5412, bit = i => ((b >>> i) & 1) !== 0;
+            for (let i = 0; i <= 5; i++) setFn(8, i, bit(i));
+            setFn(8, 7, bit(6)); setFn(8, 8, bit(7)); setFn(7, 8, bit(8));
+            for (let i = 9; i < 15; i++) setFn(14 - i, 8, bit(i));
+            for (let i = 0; i < 8; i++) setFn(size - 1 - i, 8, bit(i));
+            for (let i = 8; i < 15; i++) setFn(8, size - 15 + i, bit(i));
+            setFn(8, size - 8, true);
+        };
+        fmt(0);
+        let idx = 0;
+        for (let right = size - 1; right >= 1; right -= 2) {
+            if (right === 6) right = 5;
+            for (let vert = 0; vert < size; vert++) for (let j = 0; j < 2; j++) {
+                const x = right - j, up = ((right + 1) & 2) === 0, y = up ? size - 1 - vert : vert;
+                if (!fn[y][x] && idx < all.length * 8) { m[y][x] = ((all[idx >>> 3] >>> (7 - (idx & 7))) & 1) !== 0; idx++; }
+            }
+        }
+        const maskFn = [(x, y) => (x + y) % 2 === 0, (x, y) => y % 2 === 0, (x, y) => x % 3 === 0, (x, y) => (x + y) % 3 === 0,
+            (x, y) => (Math.floor(x / 3) + Math.floor(y / 2)) % 2 === 0, (x, y) => x * y % 2 + x * y % 3 === 0,
+            (x, y) => (x * y % 2 + x * y % 3) % 2 === 0, (x, y) => ((x + y) % 2 + x * y % 3) % 2 === 0];
+        const applyMask = mk => { for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) if (!fn[y][x] && maskFn[mk](x, y)) m[y][x] = !m[y][x]; };
+        const penalty = () => {
+            let p = 0;
+            const lines = [];
+            for (let y = 0; y < size; y++) lines.push(m[y]);
+            for (let x = 0; x < size; x++) lines.push(m.map(r => r[x]));
+            for (const L of lines) {
+                let run = 1;
+                for (let i = 1; i <= size; i++) { if (i < size && L[i] === L[i - 1]) run++; else { if (run >= 5) p += 3 + (run - 5); run = 1; } }
+                const s = L.map(v => v ? "1" : "0").join("");
+                for (const pat of ["00001011101", "10111010000"]) { let at = -1; while ((at = s.indexOf(pat, at + 1)) !== -1) p += 40; }
+            }
+            for (let y = 0; y < size - 1; y++) for (let x = 0; x < size - 1; x++) if (m[y][x] === m[y][x + 1] && m[y][x] === m[y + 1][x] && m[y][x] === m[y + 1][x + 1]) p += 3;
+            let dark = 0; m.forEach(r => r.forEach(v => { if (v) dark++; }));
+            p += Math.floor(Math.abs(dark * 20 - size * size * 10) / (size * size)) * 10;
+            return p;
+        };
+        let best = 0, bp = Infinity;
+        for (let mk = 0; mk < 8; mk++) { applyMask(mk); fmt(mk); const p = penalty(); if (p < bp) { bp = p; best = mk; } applyMask(mk); }
+        applyMask(best); fmt(best);
+        return m;
+    }
+    function matrix(text) {
+        const bytes = Array.from(Buffer.from(String(text), "utf8"));
+        return build(bytes, "M") || build(bytes, "L");
+    }
+    function svg(text, opts) {
+        const m = matrix(text); if (!m) return "";
+        const o = opts || {}, q = 4, n = m.length + q * 2;
+        let d = "";
+        for (let y = 0; y < m.length; y++) for (let x = 0; x < m.length; x++) if (m[y][x]) d += "M" + (x + q) + "," + (y + q) + "h1v1h-1z";
+        return '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ' + n + " " + n + '" width="' + (o.size || 160) + '" height="' + (o.size || 160) + '" shape-rendering="crispEdges"><rect width="100%" height="100%" fill="#fff"/><path d="' + d + '" fill="' + (o.color || "#000") + '"/></svg>';
+    }
+    return { matrix, svg };
+})();
+
+// ===================== 🛡️ كشف التلاعب في المخالفات =====================
+// يكشف: الصورة المكررة / شبه المطابقة، التسجيل بسرعة غير منطقية، تكرار نفس اللوحة، تكرار نفس المخالفة على نفس المركبة.
+// ما يمنع التسجيل ولا يرفض شي تلقائياً — بس يعلّم المخالفة وينبّه (القيادة العليا + مسؤولو المخالفات + كبار المسؤولين + المالك) وهم يتفاهمون مع العسكري.
+const FRAUD_CFG = {
+    SIMILAR_DIST: 3,                       // أقصى فرق ببصمة الصورة (من 64) نعتبر معه الصورة شبه مطابقة
+    LOOKBACK_DAYS: 45,                     // نقارن الصورة بمخالفات آخر كم يوم
+    FAST_WINDOW_MS: 2 * 60 * 1000, FAST_COUNT: 3,       // 3 مخالفات خلال دقيقتين
+    BURST_WINDOW_MS: 15 * 60 * 1000, BURST_COUNT: 6,    // 6 مخالفات خلال 15 دقيقة
+    COMBO_WINDOW_MS: 60 * 60 * 1000, COMBO_COUNT: 3,    // نفس المخالفة على نفس المركبة 3 مرات خلال ساعة
+    ALERT_THROTTLE_MS: 15 * 60 * 1000,     // تنبيهات السرعة/التكرار لنفس الشخص: إشعار واحد كل 15 دقيقة (التسجيل بالسجل يستمر)
+};
+const FraudAlert = mongoose.model("FraudAlert", new mongoose.Schema({
+    violationId: { type: String, index: true },
+    reporterDiscord: { type: String, index: true },
+    reporterName: String, reporterUnit: String,
+    flags: [{ _id: false, type: { type: String }, label: String, detail: String, refId: String }],
+    status: { type: String, default: "open", index: true },
+    resolvedBy: { type: String, default: null }, resolvedByName: { type: String, default: null },
+    resolvedAt: { type: Date, default: null }, resolveNote: { type: String, default: null },
+    createdAt: { type: Date, default: Date.now, index: true },
+}));
+const fraudNotifyAt = new Map();
+
+function fraudPhotoBuffer(dataUrl) {
+    const m = /^data:image\/[a-z+.-]+;base64,(.+)$/s.exec(String(dataUrl || ""));
+    return m ? Buffer.from(m[1], "base64") : null;
+}
+async function computePhotoHashes(dataUrl) {
+    const buf = fraudPhotoBuffer(dataUrl);
+    if (!buf) return { hash: null, phash: null };
+    const hash = crypto.createHash("sha256").update(buf).digest("hex");
+    let phash = null;
+    if (sharpLib) {
+        try {
+            const { data, info } = await sharpLib(buf).rotate().removeAlpha().greyscale().resize(9, 8, { fit: "fill" }).raw().toBuffer({ resolveWithObject: true });
+            const ch = info.channels || 1;
+            let bits = "";
+            for (let y = 0; y < 8; y++) for (let x = 0; x < 8; x++) bits += data[(y * 9 + x) * ch] < data[(y * 9 + x + 1) * ch] ? "1" : "0";
+            phash = BigInt("0b" + bits).toString(16).padStart(16, "0");
+        } catch (e) { phash = null; }
+    }
+    return { hash, phash };
+}
+function fraudHamming(a, b) {
+    let x = BigInt("0x" + a) ^ BigInt("0x" + b), c = 0;
+    while (x) { c += Number(x & 1n); x >>= 1n; }
+    return c;
+}
+function fraudDateLbl(d) {
+    try { return new Date(d).toLocaleString("ar-SA", { timeZone: "Asia/Riyadh", dateStyle: "short", timeStyle: "short" }); } catch (e) { return ""; }
+}
+// يرجّع { hash, phash, flags } — ما يرمي خطأ أبداً (لو فشل الفحص تمشي المخالفة عادي)
+async function analyzeFraud({ reporterId, photo, vehicle, violationType, plate, kind }) {
+    const out = { hash: null, phash: null, flags: [] };
+    try {
+        const { hash, phash } = await computePhotoHashes(photo);
+        out.hash = hash; out.phash = phash;
+        const now = Date.now();
+        // 1) صورة مكررة (نفس الملف بالضبط) — نتجاهل الأصلية المرفوضة لأن إعادة الإرسال بعد الرفض طبيعية
+        if (hash) {
+            const orig = await Violation.findOne({ photoHash: hash, status: { $ne: "rejected" } }).sort({ createdAt: 1 }).select("reporterName reporterDiscord createdAt").lean();
+            if (orig) {
+                const same = orig.reporterDiscord === reporterId;
+                out.flags.push({ type: "dup_photo", label: "🖼️ صورة مكررة", refId: String(orig._id),
+                    detail: (same ? "نفس الصورة سجّلها هو نفسه سابقاً" : "نفس الصورة مسجّلة سابقاً باسم " + (orig.reporterName || "عسكري آخر")) + " (" + fraudDateLbl(orig.createdAt) + ")" });
+            }
+        }
+        // 2) صورة شبه مطابقة (نفس الصورة بعد إعادة حفظ/ضغط/قص بسيط)
+        if (phash && !out.flags.length) {
+            const since = new Date(now - FRAUD_CFG.LOOKBACK_DAYS * 86400000);
+            const cands = await Violation.find({ createdAt: { $gte: since }, photoPHash: { $ne: null }, status: { $ne: "rejected" } }, { photoPHash: 1, reporterName: 1, reporterDiscord: 1, createdAt: 1 }).sort({ createdAt: -1 }).limit(8000).lean();
+            let best = null, bd = 99;
+            for (const c of cands) { const d = fraudHamming(phash, c.photoPHash); if (d < bd) { bd = d; best = c; } }
+            if (best && bd <= FRAUD_CFG.SIMILAR_DIST) {
+                out.flags.push({ type: "similar_photo", label: "🖼️ صورة شبه مطابقة", refId: String(best._id),
+                    detail: "تشبه جداً صورة مسجّلة باسم " + (best.reporterName || "-") + " (" + fraudDateLbl(best.createdAt) + ")" });
+            }
+        }
+        // 3) تكرار نفس اللوحة
+        if (plate) {
+            const pl = await Violation.findOne({ plateNumber: plate }).select("reporterName createdAt").lean();
+            if (pl) out.flags.push({ type: "dup_plate", label: "🔁 لوحة مكررة", refId: String(pl._id), detail: "نفس اللوحة (" + plate + ") مسجّلة سابقاً باسم " + (pl.reporterName || "-") });
+        }
+        // 4) سرعة غير منطقية + تكرار نفس المخالفة على نفس المركبة
+        const recent = await Violation.find({ reporterDiscord: reporterId, createdAt: { $gte: new Date(now - FRAUD_CFG.COMBO_WINDOW_MS) } }, { createdAt: 1, vehicle: 1, violationType: 1, kind: 1 }).lean();
+        const inWin = ms => recent.filter(r => now - new Date(r.createdAt).getTime() <= ms).length + 1;
+        const fast = inWin(FRAUD_CFG.FAST_WINDOW_MS), burst = inWin(FRAUD_CFG.BURST_WINDOW_MS);
+        if (fast >= FRAUD_CFG.FAST_COUNT) out.flags.push({ type: "rapid", label: "⚡ سرعة غير منطقية", detail: "سجّل " + fast + " مخالفات/تقارير خلال دقيقتين" });
+        else if (burst >= FRAUD_CFG.BURST_COUNT) out.flags.push({ type: "rapid", label: "⚡ سرعة غير منطقية", detail: "سجّل " + burst + " مخالفات/تقارير خلال 15 دقيقة" });
+        if (kind !== "report" && vehicle && violationType) {
+            const same = recent.filter(r => r.kind !== "report" && r.vehicle === vehicle && r.violationType === violationType).length + 1;
+            if (same >= FRAUD_CFG.COMBO_COUNT) out.flags.push({ type: "repeat_combo", label: "🔁 تكرار نفس المخالفة", detail: "كرر نفس المخالفة على نفس المركبة (" + vehicle + ") " + same + " مرات خلال ساعة" });
+        }
+    } catch (e) { console.error("❌ فحص التلاعب:", e.message); }
+    return out;
+}
+function fraudFields(v) {
+    if (!v || !Array.isArray(v.fraudFlags) || !v.fraudFlags.length) return [];
+    return [{ name: "🛡️ تنبيه تلاعب محتمل", value: v.fraudFlags.map(f => "• " + f.label + (f.detail ? " — " + f.detail : "")).join("\n").slice(0, 1000), inline: false }];
+}
+async function fraudRecipientIds() {
+    const s = await getSettings();
+    const ids = new Set();
+    (s.highCommand || []).forEach(m => m && m.id && ids.add(m.id));
+    getViolationsOfficers(s).forEach(m => m && m.id && ids.add(m.id));
+    seniorUids.forEach(id => ids.add(id));
+    return ids;
+}
+async function notifyFraudAlert(alert) {
+    const ids = await fraudRecipientIds();
+    if (!ids.size) return;
+    sseBroadcast("fraudalert", { t: Date.now(), id: String(alert._id) }, c => !!c.uid && ids.has(c.uid));
+    const flagsTxt = alert.flags.map(f => "• " + f.label + (f.detail ? " — " + f.detail : "")).join("\n").slice(0, 1000);
+    for (const uid of ids) {
+        try { await pushUid(uid, { title: "🛡️ تنبيه تلاعب محتمل", body: (alert.reporterName || "عسكري") + ": " + alert.flags.map(f => f.label).join(" • "), tag: "fraud-" + alert._id, url: "/?go=fraud" }); } catch (e) {}
+    }
+    if (!botReady) return;
+    const embed = new EmbedBuilder().setTitle("🛡️ تنبيه: تلاعب محتمل في المخالفات").setColor(0xef4444)
+        .addFields(
+            { name: "العسكري", value: alert.reporterName || "-", inline: true },
+            { name: "اليونت", value: alert.reporterUnit || "-", inline: true },
+            { name: "الملاحظات المكتشفة", value: flagsTxt || "-", inline: false },
+        )
+        .setFooter({ text: "تواصلوا معه وتفاهموا — النظام ما اتخذ أي إجراء تلقائي" }).setTimestamp(new Date());
+    const row = new ActionRowBuilder().addComponents(new ButtonBuilder().setLabel("🔵 فتح لوحة التلاعب").setStyle(ButtonStyle.Link).setURL(CONFIG.SITE_URL));
+    for (const uid of ids) {
+        if (stealthActor(uid)) continue;
+        try { const u = await client.users.fetch(uid); await u.send({ embeds: [embed], components: [row] }); } catch (e) {}
+    }
+}
+async function raiseFraudAlert(v, flags) {
+    if (!v || !flags || !flags.length) return;
+    try {
+        const alert = await FraudAlert.create({ violationId: String(v._id), reporterDiscord: v.reporterDiscord, reporterName: v.reporterName, reporterUnit: v.reporterUnit, flags });
+        const onlySoft = flags.every(f => f.type === "rapid" || f.type === "repeat_combo");
+        if (onlySoft) {
+            const k = String(v.reporterDiscord), last = fraudNotifyAt.get(k) || 0;
+            if (Date.now() - last < FRAUD_CFG.ALERT_THROTTLE_MS) return;
+            fraudNotifyAt.set(k, Date.now());
+        }
+        await notifyFraudAlert(alert);
+    } catch (e) { console.error("❌ فشل تسجيل/إرسال تنبيه التلاعب:", e.message); }
+}
+async function ensureFraudViewer(req, res, next) {
+    if (!req.isAuthenticated()) return res.status(401).json({ error: "غير مسجّل دخول" });
+    const settings = await getSettings();
+    if (isSeniorAdmin(req.user.id) || isHighCommand(req.user.id, settings) || isViolationsOfficer(req.user.id, settings)) { req.settings = settings; return next(); }
+    return res.status(403).json({ error: "هذا القسم للقيادة العليا ومسؤولي المخالفات والكبار فقط" });
+}
+app.get("/api/fraud/alerts", ensureFraudViewer, async (req, res) => {
+    const status = req.query.status === "resolved" ? "resolved" : "open";
+    const [list, open] = await Promise.all([
+        FraudAlert.find({ status }).sort({ createdAt: -1 }).limit(200).lean(),
+        FraudAlert.countDocuments({ status: "open" }),
+    ]);
+    res.json({ list, open });
+});
+app.get("/api/fraud/count", ensureFraudViewer, async (req, res) => {
+    res.json({ open: await FraudAlert.countDocuments({ status: "open" }) });
+});
+app.post("/api/fraud/alerts/:id/resolve", ensureFraudViewer, async (req, res) => {
+    const a = await FraudAlert.findById(req.params.id);
+    if (!a) return res.status(404).json({ error: "غير موجود" });
+    if (a.status === "resolved") return res.json({ ok: true });
+    const p = await Personnel.findOne({ discord: req.user.id }, { registeredName: 1 }).lean();
+    a.status = "resolved"; a.resolvedBy = req.user.id;
+    a.resolvedByName = isSeniorAdmin(req.user.id) ? "كبار المسؤولين" : ((p && p.registeredName) || req.user.username);
+    a.resolvedAt = new Date(); a.resolveNote = String((req.body || {}).note || "").trim().slice(0, 500) || null;
+    await a.save();
+    await logEvent({ action: "معالجة تنبيه تلاعب", discordId: a.reporterDiscord, discordTag: a.reporterName, actorId: req.user.id, actorTag: req.user.username, details: (a.flags || []).map(f => f.label).join("، ") + (a.resolveNote ? " — " + a.resolveNote : "") });
+    res.json({ ok: true });
+});
+
+// ===================== 📜 الشهادات الرسمية بباركود تحقق =====================
+// تصدر: كبار المسؤولين/المالك، القيادة العليا، قادة ونواب القطاعات، الشرطة العسكرية. العسكري ما يطلعها لنفسه (إلا الكبار).
+// الشهادة تنسجل بملف العسكري، ولكل من يقدر يصدر يقدر يشيلها (تصير "ملغاة" وتختفي من ملفه ويظهر ذلك بصفحة التحقق).
+const CERT_KINDS = { service: "شهادة خدمة", points: "كشف نقاط" };
+const CERT_DEFAULTS = { presName: "عبدالعزيز السهلي", presTitle: "رئيس السيرفر", vpName: "مهيدي القحطاني", vpTitle: "نائب رئيس السيرفر" };
+const CertSchema = new mongoose.Schema({
+    code: { type: String, unique: true, index: true },
+    kind: { type: String, enum: ["service", "points"], default: "service" },
+    targetDiscord: { type: String, index: true },
+    data: { type: mongoose.Schema.Types.Mixed, default: {} },
+    issuedBy: String, issuedByName: String, issuedByRole: String,
+    status: { type: String, enum: ["active", "revoked"], default: "active", index: true },
+    revokedBy: { type: String, default: null }, revokedByName: { type: String, default: null }, revokedAt: { type: Date, default: null },
+    createdAt: { type: Date, default: Date.now, index: true },
+});
+const Certificate = mongoose.model("Certificate", CertSchema);
+
+function genCertCode() {
+    const A = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"; let s = "";
+    for (const x of crypto.randomBytes(12)) s += A[x % A.length];
+    return "FL-" + s.slice(0, 4) + "-" + s.slice(4, 8) + "-" + s.slice(8, 12);
+}
+const CERT_CODE_RE = /^FL-[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}$/;
+function certEsc(t) { return String(t == null ? "" : t).replace(/[&<>"']/g, m => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[m])); }
+function certDate(d) { try { return new Date(d).toLocaleDateString("ar-SA-u-ca-gregory-nu-latn", { timeZone: "Asia/Riyadh", year: "numeric", month: "long", day: "numeric" }); } catch (e) { return ""; } }
+
+// يرجّع اسم صفة المصدِر لو يقدر يصدر، وإلا null
+async function certIssuerRole(uid, settings) {
+    settings = settings || await getSettings();
+    if (isSeniorAdmin(uid)) return "كبار المسؤولين";
+    if (isHighCommand(uid, settings)) return "القيادة العليا";
+    const sr = getSectorRole(uid, settings);
+    if (sr && (sr.role === "commander" || sr.role === "deputy")) return "قيادة " + (sr.sectorLabel || "القطاع");
+    if (getMPRole(uid, settings) || isMPPersonnelOfficer(uid, settings) || await isMilitaryPoliceMember(uid)) return "الشرطة العسكرية";
+    return null;
+}
+async function ensureCertIssuer(req, res, next) {
+    if (!req.isAuthenticated()) return res.status(401).json({ error: "غير مسجّل دخول" });
+    const settings = await getSettings();
+    const role = await certIssuerRole(req.user.id, settings);
+    if (!role) return res.status(403).json({ error: "إصدار الشهادات للقيادة والكبار والشرطة العسكرية فقط" });
+    req.certRole = role; req.settings = settings;
+    next();
+}
+function certPublic(c) {
+    return { code: c.code, kind: c.kind, kindLabel: CERT_KINDS[c.kind] || c.kind, targetDiscord: c.targetDiscord, name: (c.data || {}).name, rank: (c.data || {}).rank,
+        issuedByName: c.issuedByName, issuedByRole: c.issuedByRole, status: c.status, createdAt: c.createdAt, revokedByName: c.revokedByName, revokedAt: c.revokedAt };
+}
+async function certListFor(discord) {
+    const list = await Certificate.find({ targetDiscord: discord, status: "active" }).sort({ createdAt: -1 }).limit(100).lean();
+    return list.map(certPublic);
+}
+async function certBuildData(p, settings) {
+    const [acc, approved, progress] = await Promise.all([
+        Account.findOne({ uid: p.discord }, { createdAt: 1 }).lean(),
+        Violation.countDocuments({ reporterDiscord: p.discord, status: "approved" }),
+        rankProgress(p, settings).catch(() => ({})),
+    ]);
+    return {
+        name: p.registeredName || p.discordTag || p.discord, rank: p.rank || "-", unit: p.unit || "-",
+        sector: p.sector ? (CONFIG.SECTORS[p.sector] || p.sector) : null, cardNumber: p.cardNumber || "-", points: p.points || 0,
+        nextRank: progress.nextRank || null, remaining: progress.remaining || 0,
+        serviceStart: (acc && acc.createdAt) || p.createdAt || new Date(), approvedViolations: approved,
+        warnings: (p.warnings || []).filter(w => (w.kind || "warning") === "warning").length,
+    };
+}
+
+app.get("/api/certs/mine", ensureAuth, async (req, res) => { res.json({ list: await certListFor(req.user.id) }); });
+app.get("/api/certs/search", ensureCertIssuer, async (req, res) => {
+    const q = String(req.query.q || "").trim();
+    if (q.length < 2) return res.json({ list: [] });
+    const qe = q.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), rx = new RegExp(qe, "i");
+    const hidden = hiddenOwnerIds(req);
+    const list = await Personnel.find({ registeredName: { $ne: null }, discord: { $nin: hidden }, $or: [{ registeredName: rx }, { discordTag: rx }, { cardNumber: rx }, { unit: rx }] },
+        { discord: 1, registeredName: 1, rank: 1, unit: 1, cardNumber: 1 }).limit(20).lean();
+    res.json({ list: list.map(p => ({ discord: p.discord, name: p.registeredName, rank: p.rank, unit: p.unit, cardNumber: p.cardNumber })) });
+});
+app.get("/api/certs/member/:discord", ensureCertIssuer, async (req, res) => {
+    if (hiddenOwnerIds(req).includes(req.params.discord)) return res.json({ list: [] });
+    res.json({ list: await certListFor(req.params.discord) });
+});
+app.get("/api/certs/recent", ensureCertIssuer, async (req, res) => {
+    const list = await Certificate.find({}).sort({ createdAt: -1 }).limit(60).lean();
+    res.json({ list: list.map(certPublic) });
+});
+app.post("/api/certs/issue", ensureCertIssuer, async (req, res) => {
+    const { discord, kind } = req.body || {};
+    if (!CERT_KINDS[kind]) return res.status(400).json({ error: "نوع الشهادة غير صحيح" });
+    if (!discord || typeof discord !== "string") return res.status(400).json({ error: "حدد العسكري" });
+    if (discord === req.user.id && !isSeniorAdmin(req.user.id)) return res.status(403).json({ error: "ما تقدر تصدر شهادة لنفسك — لازم غيرك من القيادة يصدرها لك" });
+    if (hiddenOwnerIds(req).includes(discord)) return res.status(404).json({ error: "غير موجود" });
+    const p = await Personnel.findOne({ discord });
+    if (!p || !p.registeredName) return res.status(404).json({ error: "العسكري غير موجود أو ما أكمل بياناته" });
+    const settings = req.settings;
+    const data = await certBuildData(p, settings);
+    const me = await Personnel.findOne({ discord: req.user.id }, { registeredName: 1 }).lean();
+    const issuedByName = isSeniorAdmin(req.user.id) ? "كبار المسؤولين" : ((me && me.registeredName) || req.user.username);
+    let c = null;
+    for (let i = 0; i < 5 && !c; i++) {
+        try { c = await Certificate.create({ code: genCertCode(), kind, targetDiscord: discord, data, issuedBy: req.user.id, issuedByName, issuedByRole: req.certRole }); }
+        catch (e) { if (!(e && e.code === 11000)) throw e; }
+    }
+    if (!c) return res.status(500).json({ error: "تعذر توليد رقم الشهادة، حاول مرة ثانية" });
+    await logEvent({ action: "إصدار شهادة", discordId: p.discord, discordTag: p.discordTag, actorId: req.user.id, actorTag: req.user.username, details: CERT_KINDS[kind] + " لـ " + data.name + " (" + c.code + ")" });
+    try { await pushUid(discord, { title: "📜 صدرت لك شهادة", body: CERT_KINDS[kind] + " — افتح الموقع لعرضها", tag: "cert-" + c.code, url: "/?go=certs" }); } catch (e) {}
+    res.json({ ok: true, cert: certPublic(c), url: "/cert/" + c.code });
+});
+app.post("/api/certs/:code/revoke", ensureCertIssuer, async (req, res) => {
+    const code = String(req.params.code || "").toUpperCase();
+    const c = CERT_CODE_RE.test(code) ? await Certificate.findOne({ code }) : null;
+    if (!c) return res.status(404).json({ error: "الشهادة غير موجودة" });
+    if (c.status === "revoked") return res.json({ ok: true });
+    const me = await Personnel.findOne({ discord: req.user.id }, { registeredName: 1 }).lean();
+    c.status = "revoked"; c.revokedBy = req.user.id; c.revokedAt = new Date();
+    c.revokedByName = isSeniorAdmin(req.user.id) ? "كبار المسؤولين" : ((me && me.registeredName) || req.user.username);
+    await c.save();
+    await logEvent({ action: "سحب شهادة", discordId: c.targetDiscord, actorId: req.user.id, actorTag: req.user.username, details: (CERT_KINDS[c.kind] || "") + " (" + c.code + ") — " + ((c.data || {}).name || "") });
+    res.json({ ok: true });
+});
+// توقيعات وأختام رئيس ونائب رئيس السيرفر (المالك فقط): صور PNG/JPG/WEBP أو أسماء
+app.get("/api/owner/cert-assets", ensureAuth, async (req, res) => {
+    if (!isOwnerUid(req.user.id)) return res.status(403).json({ error: "غير مصرح" });
+    const a = (await getSettings()).certAssets || {};
+    res.json({ presName: a.presName || CERT_DEFAULTS.presName, vpName: a.vpName || CERT_DEFAULTS.vpName, has: { presSig: !!a.presSig, presStamp: !!a.presStamp, vpSig: !!a.vpSig, vpStamp: !!a.vpStamp } });
+});
+app.post("/api/owner/cert-assets", ensureAuth, async (req, res) => {
+    if (!isOwnerUid(req.user.id)) return res.status(403).json({ error: "غير مصرح" });
+    const { key, image, value } = req.body || {};
+    const s = await getSettings();
+    const a = Object.assign({}, s.certAssets || {});
+    if (key === "presName" || key === "vpName") {
+        const v = String(value || "").trim().slice(0, 60);
+        if (v) a[key] = v; else delete a[key];
+    } else if (["presSig", "presStamp", "vpSig", "vpStamp"].includes(key)) {
+        if (image === null || image === "") delete a[key];
+        else if (typeof image === "string" && image.length <= 1500000 && /^data:image\/(png|jpeg|webp);base64,[A-Za-z0-9+/=]+$/.test(image)) a[key] = image;
+        else return res.status(400).json({ error: "الصورة لازم تكون PNG أو JPG أو WEBP وأقل من 1MB تقريباً" });
+    } else return res.status(400).json({ error: "مفتاح غير صحيح" });
+    s.certAssets = a; s.markModified("certAssets"); await s.save();
+    res.json({ ok: true });
+});
+
+// ---- رسم التواقيع والأختام الافتراضية (تنستبدل بصور المالك لو انرفعت) ----
+function certSigSvg(variant) {
+    const d = variant === 1
+        ? "M8 62 C 20 20, 34 14, 38 44 S 52 70, 60 36 S 78 10, 86 40 S 104 66, 112 34 C 118 18, 130 22, 124 46 C 150 40, 176 38, 196 52"
+        : "M10 54 C 24 24, 40 22, 44 50 C 48 72, 60 66, 66 40 C 70 22, 84 24, 88 46 S 106 70, 118 44 C 124 28, 138 36, 134 56 C 160 34, 178 30, 198 40";
+    return '<svg viewBox="0 0 210 80" width="170" height="64" xmlns="http://www.w3.org/2000/svg"><path d="' + d + '" fill="none" stroke="#1d3a8a" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/><path d="M20 70 C 80 62, 140 68, 192 60" fill="none" stroke="#1d3a8a" stroke-width="1.4" stroke-linecap="round" opacity=".7"/></svg>';
+}
+function certStampSvg(title, color) {
+    const c = color;
+    return '<svg viewBox="0 0 120 120" width="104" height="104" xmlns="http://www.w3.org/2000/svg" style="transform:rotate(-12deg);mix-blend-mode:multiply;"><circle cx="60" cy="60" r="55" fill="none" stroke="' + c + '" stroke-width="3"/><circle cx="60" cy="60" r="48" fill="none" stroke="' + c + '" stroke-width="1.2"/><circle cx="60" cy="60" r="30" fill="none" stroke="' + c + '" stroke-width="1" stroke-dasharray="2 3"/>' +
+        '<text x="60" y="32" text-anchor="middle" font-size="11" font-weight="700" fill="' + c + '" font-family="Tajawal,Cairo,Arial,sans-serif">' + certEsc(CONFIG.SITE_NAME) + '</text>' +
+        '<text x="60" y="63" text-anchor="middle" font-size="14" font-weight="700" fill="' + c + '" font-family="Tajawal,Cairo,Arial,sans-serif">ختم رسمي</text>' +
+        '<text x="60" y="80" text-anchor="middle" font-size="9" fill="' + c + '" font-family="Tajawal,Cairo,Arial,sans-serif">' + certEsc(title) + '</text>' +
+        '<text x="60" y="104" text-anchor="middle" font-size="9" fill="' + c + '" font-family="Tajawal,Cairo,Arial,sans-serif">★ ★ ★</text></svg>';
+}
+function certAssetImg(src, h) { return '<img src="' + src + '" style="max-height:' + h + 'px;max-width:190px;object-fit:contain;mix-blend-mode:multiply;">'; }
+
+function certPageHtml(c, assets, forPrint) {
+    assets = assets || {};
+    const d = c.data || {}, kindLbl = CERT_KINDS[c.kind] || "شهادة";
+    const presName = assets.presName || CERT_DEFAULTS.presName, vpName = assets.vpName || CERT_DEFAULTS.vpName;
+    const url = CONFIG.SITE_URL.replace(/\/+$/, "") + "/verify/" + c.code;
+    const qr = FlashQR.svg(url, { size: 120, color: "#0b1f4a" }) || FlashQR.svg(c.code, { size: 120, color: "#0b1f4a" });
+    const row = (k, v) => '<tr><td class="k">' + k + '</td><td>' + certEsc(v) + '</td></tr>';
+    const body = c.kind === "points"
+        ? '<p class="lead">تشهد إدارة السيرفر بأن العسكري المذكور بياناته أدناه يملك الرصيد التالي من النقاط حتى تاريخ الإصدار:</p><table>' +
+          row("الاسم", d.name) + row("رقم البطاقة", d.cardNumber) + row("الرتبة الحالية", d.rank) + row("اليونت", d.unit) + (d.sector ? row("القطاع", d.sector) : "") +
+          row("رصيد النقاط", d.points) + (d.nextRank ? row("الرتبة التالية", d.nextRank + " (المتبقي " + d.remaining + " نقطة)") : row("الرتبة التالية", "وصل لأعلى رتبة")) +
+          row("المخالفات المقبولة", d.approvedViolations) + row("عدد التحذيرات", d.warnings) + '</table>'
+        : '<p class="lead">تشهد إدارة السيرفر بأن العسكري المذكور بياناته أدناه منسوب للخدمة لدينا، وقد مُنح هذه الشهادة بناءً على سجل خدمته:</p><table>' +
+          row("الاسم", d.name) + row("رقم البطاقة", d.cardNumber) + row("الرتبة", d.rank) + row("اليونت", d.unit) + (d.sector ? row("القطاع", d.sector) : "") +
+          row("تاريخ الالتحاق بالخدمة", certDate(d.serviceStart)) + row("رصيد النقاط", d.points) + row("المخالفات المقبولة", d.approvedViolations) + '</table>';
+    const revoked = c.status === "revoked";
+    return '<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex">' +
+        '<title>' + certEsc(kindLbl) + ' — ' + certEsc(d.name) + '</title>' +
+        '<link rel="preconnect" href="https://fonts.googleapis.com"><link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;500;700;800&display=swap" rel="stylesheet">' +
+        '<style>@page{size:A4;margin:0}*{box-sizing:border-box}html,body{margin:0;background:#e5e7eb;font-family:Tajawal,Cairo,"Segoe UI",Tahoma,Arial,sans-serif;-webkit-print-color-adjust:exact;print-color-adjust:exact}' +
+        '.bar{position:sticky;top:0;z-index:5;background:#0b1f4a;color:#fff;padding:10px 16px;display:flex;gap:10px;align-items:center;justify-content:space-between}.bar button{background:#c9a227;color:#0b1f4a;border:0;border-radius:8px;padding:9px 16px;font:700 15px Tajawal,sans-serif;cursor:pointer}' +
+        '.page{width:210mm;min-height:297mm;margin:16px auto;background:#fffdf7;position:relative;padding:14mm;box-shadow:0 6px 30px rgba(0,0,0,.25)}' +
+        '.frame{border:3px solid #0b1f4a;outline:1.5px solid #c9a227;outline-offset:-9px;min-height:269mm;padding:12mm 12mm 10mm;position:relative;display:flex;flex-direction:column}' +
+        '.hd{text-align:center;border-bottom:2px solid #c9a227;padding-bottom:10px}.hd .org{font-size:26px;font-weight:800;color:#0b1f4a}.hd .sub{font-size:13px;color:#6b7280;margin-top:2px}' +
+        '.title{text-align:center;font-size:38px;font-weight:800;color:#8a6d0b;margin:22px 0 6px}.no{text-align:center;color:#6b7280;font-size:13px;letter-spacing:1px}' +
+        '.lead{font-size:17px;line-height:2;color:#1f2937;margin:18px 0 12px;text-align:center}table{width:100%;border-collapse:collapse;margin:8px 0;font-size:17px}td{border:1px solid #d6c27a;padding:9px 14px;color:#111827}td.k{background:#f6efd2;width:34%;font-weight:700;color:#0b1f4a}' +
+        '.sigs{display:flex;justify-content:space-between;align-items:flex-end;margin-top:auto;padding-top:26px;gap:8px}.sig{text-align:center;width:33%}.sig .box{height:112px;display:flex;align-items:center;justify-content:center;position:relative}.sig .box .st{position:absolute;opacity:.88}.sig .nm{font-weight:800;color:#0b1f4a;font-size:17px;border-top:1.5px solid #0b1f4a;padding-top:6px;margin-top:2px}.sig .tt{font-size:13px;color:#6b7280}' +
+        '.qr{text-align:center;width:33%}.qr svg{border:1px solid #d6c27a;border-radius:6px;padding:3px;background:#fff}.qr .cap{font-size:11px;color:#6b7280;margin-top:4px;line-height:1.5}' +
+        '.meta{margin-top:12px;border-top:1px dashed #c9a227;padding-top:8px;font-size:12px;color:#4b5563;display:flex;justify-content:space-between;flex-wrap:wrap;gap:6px}' +
+        '.wm{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:150px;font-weight:800;color:rgba(220,38,38,.18);transform:rotate(-25deg);pointer-events:none}' +
+        '@media print{html,body{background:#fff}.bar{display:none}.page{margin:0;box-shadow:none}}@media(max-width:820px){.page{width:100%;min-height:0;padding:6px;margin:0}.frame{padding:14px}.title{font-size:28px}table{font-size:14px}.sigs{flex-wrap:wrap}.sig,.qr{width:48%}}</style></head><body>' +
+        (forPrint === false ? "" : '<div class="bar"><span>📜 ' + certEsc(kindLbl) + '</span><button onclick="window.print()">🖨️ طباعة / حفظ PDF</button></div>') +
+        '<div class="page"><div class="frame">' + (revoked ? '<div class="wm">ملغاة</div>' : '') +
+        '<div class="hd"><div class="org">' + certEsc(CONFIG.SITE_NAME) + '</div><div class="sub">الإدارة العامة للسيرفر — وثيقة رسمية</div></div>' +
+        '<div class="title">' + certEsc(kindLbl) + '</div><div class="no">رقم الوثيقة: <b dir="ltr">' + certEsc(c.code) + '</b></div>' + body +
+        '<div class="sigs">' +
+        '<div class="sig"><div class="box"><div class="st">' + (assets.vpStamp ? certAssetImg(assets.vpStamp, 100) : certStampSvg(CERT_DEFAULTS.vpTitle, "#b91c1c")) + '</div>' + (assets.vpSig ? certAssetImg(assets.vpSig, 70) : certSigSvg(2)) + '</div><div class="nm">' + certEsc(vpName) + '</div><div class="tt">' + certEsc(CERT_DEFAULTS.vpTitle) + '</div></div>' +
+        '<div class="qr">' + qr + '<div class="cap">امسح الرمز للتحقق من صحة الوثيقة</div></div>' +
+        '<div class="sig"><div class="box"><div class="st">' + (assets.presStamp ? certAssetImg(assets.presStamp, 100) : certStampSvg(CERT_DEFAULTS.presTitle, "#1d3a8a")) + '</div>' + (assets.presSig ? certAssetImg(assets.presSig, 70) : certSigSvg(1)) + '</div><div class="nm">' + certEsc(presName) + '</div><div class="tt">' + certEsc(CERT_DEFAULTS.presTitle) + '</div></div>' +
+        '</div><div class="meta"><span>تاريخ الإصدار: ' + certDate(c.createdAt) + '</span><span>أصدرها: ' + certEsc(c.issuedByRole || "") + '</span><span dir="ltr">' + certEsc(url) + '</span></div>' +
+        '</div></div></body></html>';
+}
+async function certAssetsNow() { try { return (await getSettings()).certAssets || {}; } catch (e) { return {}; } }
+// عرض الشهادة للطباعة/PDF: صاحبها أو من يقدر يصدر
+app.get("/cert/:code", async (req, res) => {
+    try {
+        const code = String(req.params.code || "").toUpperCase();
+        if (!req.isAuthenticated || !req.isAuthenticated()) return res.redirect("/");
+        const c = CERT_CODE_RE.test(code) ? await Certificate.findOne({ code }).lean() : null;
+        if (!c) return res.status(404).send("الشهادة غير موجودة");
+        if (c.targetDiscord !== req.user.id && !(await certIssuerRole(req.user.id))) return res.status(403).send("غير مصرح");
+        if (c.status === "revoked" && c.targetDiscord === req.user.id && !(await certIssuerRole(req.user.id))) return res.status(404).send("هذي الشهادة تم سحبها");
+        res.set("Cache-Control", "no-store").type("html").send(certPageHtml(c, await certAssetsNow()));
+    } catch (e) { res.status(500).send("خطأ"); }
+});
+// صفحة التحقق العامة (يفتحها أي أحد يمسح الباركود)
+app.get("/verify/:code", async (req, res) => {
+    const code = String(req.params.code || "").toUpperCase();
+    let c = null;
+    try { c = CERT_CODE_RE.test(code) ? await Certificate.findOne({ code }).lean() : null; } catch (e) {}
+    const d = (c && c.data) || {};
+    let status, color, icon, msg;
+    if (!c) { status = "غير موجودة"; color = "#b91c1c"; icon = "❌"; msg = "لا توجد وثيقة بهذا الرقم في سجلات " + CONFIG.SITE_NAME + ". احذر من الوثائق المزوّرة."; }
+    else if (c.status === "revoked") { status = "ملغاة"; color = "#b45309"; icon = "⚠️"; msg = "هذي الوثيقة كانت صادرة ثم تم سحبها، ولا يُعتدّ بها."; }
+    else { status = "سارية وصحيحة"; color = "#15803d"; icon = "✅"; msg = "هذي الوثيقة صادرة رسمياً من " + CONFIG.SITE_NAME + " ومسجّلة في ملف العسكري."; }
+    const row = (k, v) => '<div class="r"><span>' + k + '</span><b>' + certEsc(v) + '</b></div>';
+    const details = c ? row("نوع الوثيقة", CERT_KINDS[c.kind] || "-") + row("اسم العسكري", d.name || "-") + row("الرتبة وقت الإصدار", d.rank || "-") + row("اليونت", d.unit || "-") +
+        row("تاريخ الإصدار", certDate(c.createdAt)) + row("جهة الإصدار", c.issuedByRole || "-") + row("رقم الوثيقة", c.code) + (c.status === "revoked" ? row("تاريخ السحب", certDate(c.revokedAt)) : "") : "";
+    res.set("Cache-Control", "no-store").type("html").send('<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex"><title>التحقق من الوثيقة</title>' +
+        '<link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;700;800&display=swap" rel="stylesheet"><style>*{box-sizing:border-box}body{margin:0;background:#0b1f4a;font-family:Tajawal,Cairo,"Segoe UI",Tahoma,Arial,sans-serif;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:16px}' +
+        '.c{background:#fffdf7;border-radius:16px;max-width:460px;width:100%;overflow:hidden;box-shadow:0 10px 40px rgba(0,0,0,.4)}.h{background:' + color + ';color:#fff;text-align:center;padding:22px 14px}.h .i{font-size:46px}.h .s{font-size:24px;font-weight:800;margin-top:4px}' +
+        '.m{padding:14px 18px;color:#374151;line-height:1.8;text-align:center;font-size:15px;border-bottom:1px solid #eee}.r{display:flex;justify-content:space-between;gap:10px;padding:10px 18px;border-bottom:1px solid #f1f1f1;font-size:15px}.r span{color:#6b7280}.r b{color:#0b1f4a;text-align:left}.f{text-align:center;color:#9ca3af;font-size:12px;padding:12px}</style></head><body>' +
+        '<div class="c"><div class="h"><div class="i">' + icon + '</div><div class="s">' + status + '</div></div><div class="m">' + certEsc(msg) + '</div>' + details + '<div class="f">' + certEsc(CONFIG.SITE_NAME) + ' — نظام التحقق من الوثائق</div></div></body></html>');
 });
 
 const VIOLATION_COOLDOWN_MS = 5 * 1000;
@@ -2839,14 +3377,18 @@ app.post("/api/violations/submit", ensureAuth, async (req, res) => {
         }
         const vehicleDoc = await Vehicle.findOne({ name: vehicle });
 
+        const plate = generatePlate();
+        const fr = await analyzeFraud({ reporterId: req.user.id, photo, vehicle, violationType, plate, kind: "violation" });
         const v = await Violation.create({
             reporterDiscord: req.user.id, reporterTag: req.user.username,
             reporterName: p.registeredName, reporterUnit: p.unit,
             violationType, vehicle, vehiclePhoto: vehicleDoc?.photo || null,
-            plateNumber: generatePlate(), status: "pending",
+            plateNumber: plate, status: "pending",
+            photoHash: fr.hash, photoPHash: fr.phash, fraudFlags: fr.flags,
         });
         await postViolationToChannel(v, photo);
-        res.json({ ok: true, violation: v });
+        raiseFraudAlert(v, fr.flags).catch(() => {});
+        res.json({ ok: true, violation: { _id: v._id, status: v.status, plateNumber: v.plateNumber, violationType: v.violationType, vehicle: v.vehicle, createdAt: v.createdAt } });
     } finally {
         violationLocks.delete(req.user.id);
     }
@@ -2857,7 +3399,7 @@ app.get("/api/violations/mine", ensureAuth, async (req, res, next) => {
         const list = await Violation.aggregate([
             { $match: { reporterDiscord: req.user.id } },
             { $addFields: { hasPhoto: { $or: [{ $ifNull: ["$photo", false] }, { $ifNull: ["$photoMessageId", false] }, { $ifNull: ["$photoDb", false] }] } } },
-            { $project: { photo: 0 } },
+            { $project: { photo: 0, photoHash: 0, photoPHash: 0, fraudFlags: 0 } },
             { $sort: { createdAt: -1 } },
             { $limit: 500 }
         ]);
@@ -2885,7 +3427,7 @@ app.get("/api/violations/:id/photo", ensureAuth, async (req, res) => {
             || settings.adminList.includes(req.user.id)
             || !!getSectorRole(req.user.id, settings) || !!getPersonnelOfficerSector(req.user.id, settings)
             || !!getSectorViolOfficer(req.user.id, settings)
-            || isViolationsOfficer(req.user.id, settings);
+            || isViolationsOfficer(req.user.id, settings) || isHighCommand(req.user.id, settings);
         if (!allowed) return res.status(403).json({ error: "غير مصرح" });
         { const d = await violationPhotoDoc(v); if (d && d.full) return res.json({ photo: d.full }); }
 
@@ -2948,7 +3490,7 @@ async function violationPhotoAllowed(req, v) {
         || settings.adminList.includes(req.user.id)
         || !!getSectorRole(req.user.id, settings) || !!getPersonnelOfficerSector(req.user.id, settings)
         || !!getSectorViolOfficer(req.user.id, settings)
-        || isViolationsOfficer(req.user.id, settings);
+        || isViolationsOfficer(req.user.id, settings) || isHighCommand(req.user.id, settings);
 }
 async function violationPhotoDoc(v) {
     if (!(v && v.photoDb && ViolationPhoto)) return null;
@@ -2979,7 +3521,7 @@ app.get("/api/violations/:id/photo-file", ensureAuth, async (req, res) => {
             || settings.adminList.includes(req.user.id)
             || !!getSectorRole(req.user.id, settings) || !!getPersonnelOfficerSector(req.user.id, settings)
             || !!getSectorViolOfficer(req.user.id, settings)
-            || isViolationsOfficer(req.user.id, settings);
+            || isViolationsOfficer(req.user.id, settings) || isHighCommand(req.user.id, settings);
         if (!allowed) return res.status(403).send("forbidden");
         { const d = await violationPhotoDoc(v); if (d && sendDataUrl(res, d.full)) return; }
         if (v.photoChannelId && v.photoMessageId) {
@@ -3112,8 +3654,10 @@ app.post("/api/reports/submit", ensureAntiDrugsRole, async (req, res) => {
         const vehicleDoc = await Vehicle.findOne({ name: vehicle });
 
         const created = [];
+        const fr = await analyzeFraud({ reporterId: req.user.id, photo, vehicle, violationType: null, kind: "report" });
         for (const it of items) {
             const v = await Violation.create({
+                photoHash: fr.hash, photoPHash: fr.phash, fraudFlags: fr.flags,
                 reporterDiscord: req.user.id, reporterTag: req.user.username,
                 reporterName: p.registeredName, reporterUnit: p.unit,
                 kind: "report", reportCategory: category,
@@ -3128,7 +3672,8 @@ app.post("/api/reports/submit", ensureAntiDrugsRole, async (req, res) => {
             await postViolationToChannel(v, photo);
             created.push(v);
         }
-        res.json({ ok: true, count: created.length, reports: created });
+        if (created.length) raiseFraudAlert(created[0], fr.flags).catch(() => {});
+        res.json({ ok: true, count: created.length, reports: created.map(v => ({ _id: v._id, status: v.status, plateNumber: v.plateNumber })) });
     } finally {
         reportLocks.delete(req.user.id);
     }
@@ -3138,7 +3683,7 @@ app.get("/api/admin/pending", ensureSeniorAdmin, async (req, res) => {
     const list = await Violation.aggregate([
         { $match: { status: "pending" } },
         { $addFields: { hasPhoto: { $or: [{ $ifNull: ["$photo", false] }, { $ifNull: ["$photoMessageId", false] }, { $ifNull: ["$photoDb", false] }] } } },
-        { $project: { photo: 0 } },
+        { $project: { photo: 0, photoHash: 0, photoPHash: 0 } },
         { $sort: { createdAt: 1 } }
     ]);
     res.json({ list });
@@ -3208,7 +3753,8 @@ app.get("/api/senior/personnel/:discord/file", ensureSeniorAdmin, async (req, re
         absent: receipts.filter(r => r.kind === "absent").length,
         leave: receipts.filter(r => r.kind === "leave").length,
     };
-    res.json({ personnel: p, progress, account, attendance, receipts, receiptStats });
+    const certs = await certListFor(p.discord).catch(() => []);
+    res.json({ personnel: p, progress, account, attendance, receipts, receiptStats, certs });
 });
 
 app.post("/api/senior/personnel/:discord/note", ensureSeniorAdmin, async (req, res) => {
@@ -3687,7 +4233,7 @@ app.get("/api/senior/violations/reviewed", ensureSeniorAdmin, async (req, res) =
     const list = await Violation.aggregate([
         { $match: { status: { $in: ["approved", "rejected"] } } },
         { $addFields: { hasPhoto: { $or: [{ $ifNull: ["$photo", false] }, { $ifNull: ["$photoMessageId", false] }, { $ifNull: ["$photoDb", false] }] } } },
-        { $project: { photo: 0 } },
+        { $project: { photo: 0, photoHash: 0, photoPHash: 0 } },
         { $sort: { reviewedAt: -1 } },
         { $limit: 300 },
     ]).option({ maxTimeMS: 10000 });
@@ -4573,7 +5119,7 @@ app.get("/api/sector/violations", ensureSectorLeader, async (req, res) => {
         const list = ids.length ? await Violation.aggregate([
             { $match: { reporterDiscord: { $in: ids }, status: "pending" } },
             { $addFields: { hasPhoto: { $or: [{ $ifNull: ["$photo", false] }, { $ifNull: ["$photoMessageId", false] }, { $ifNull: ["$photoDb", false] }] } } },
-            { $project: { photo: 0 } },
+            { $project: { photo: 0, photoHash: 0, photoPHash: 0, fraudFlags: 0 } },
             { $sort: { createdAt: -1 } },
             { $limit: 300 }
         ]) : [];
@@ -4672,7 +5218,7 @@ app.get("/api/sector-viol-officer/pending", ensureSectorViolOfficer, async (req,
     const list = ids.length ? await Violation.aggregate([
         { $match: { reporterDiscord: { $in: ids }, status: "pending" } },
         { $addFields: { hasPhoto: { $or: [{ $ifNull: ["$photo", false] }, { $ifNull: ["$photoMessageId", false] }, { $ifNull: ["$photoDb", false] }] } } },
-        { $project: { photo: 0 } },
+        { $project: { photo: 0, photoHash: 0, photoPHash: 0, fraudFlags: 0 } },
         { $sort: { createdAt: 1 } },
         { $limit: 300 },
     ]).option({ maxTimeMS: 10000 }) : [];
@@ -5143,7 +5689,7 @@ app.get("/api/violations-officer/pending", ensureViolationsOfficer, async (req, 
     const list = await Violation.aggregate([
         { $match: { status: "pending" } },
         { $addFields: { hasPhoto: { $or: [{ $ifNull: ["$photo", false] }, { $ifNull: ["$photoMessageId", false] }, { $ifNull: ["$photoDb", false] }] } } },
-        { $project: { photo: 0 } },
+        { $project: { photo: 0, photoHash: 0, photoPHash: 0 } },
         { $sort: { createdAt: 1 } },
         { $limit: 300 },
     ]).option({ maxTimeMS: 10000 });
@@ -5153,7 +5699,7 @@ app.get("/api/violations-officer/log", ensureViolationsOfficer, async (req, res)
     const list = await Violation.aggregate([
         { $match: { status: { $in: ["approved", "rejected"] } } },
         { $addFields: { hasPhoto: { $or: [{ $ifNull: ["$photo", false] }, { $ifNull: ["$photoMessageId", false] }, { $ifNull: ["$photoDb", false] }] } } },
-        { $project: { photo: 0 } },
+        { $project: { photo: 0, photoHash: 0, photoPHash: 0 } },
         { $sort: { reviewedAt: -1 } },
         { $limit: 300 },
     ]).option({ maxTimeMS: 10000 });
@@ -5268,7 +5814,7 @@ app.get("/api/personnel-officer/violations", ensurePersonnelOfficer, async (req,
     const list = juniorIds.length ? await Violation.aggregate([
         { $match: { reporterDiscord: { $in: juniorIds }, status: "pending" } },
         { $addFields: { hasPhoto: { $or: [{ $ifNull: ["$photo", false] }, { $ifNull: ["$photoMessageId", false] }, { $ifNull: ["$photoDb", false] }] } } },
-        { $project: { photo: 0 } },
+        { $project: { photo: 0, photoHash: 0, photoPHash: 0, fraudFlags: 0 } },
         { $sort: { createdAt: -1 } },
         { $limit: 300 }
     ]) : [];
@@ -13103,6 +13649,7 @@ function spConnect() {
                 if (typeof hcTab !== 'undefined' && hcTab === 'pending' && document.getElementById('hc-content')) loadHCPending(true);
             } catch (x) {}
         });
+        es.addEventListener('fraudalert', function () { try { if (!ME || !ME.canFraud) return; toast('🛡️ تنبيه تلاعب محتمل في المخالفات'); if (document.getElementById('fr-list') && FR_TAB === 'open') frLoad(); } catch (x) {} });
         es.addEventListener('vsig', function (e) { try { offOnVsig(JSON.parse(e.data)); } catch (x) {} });
         es.addEventListener('court', function () { try { if (ME && ME.courtLocked) courtCheck(); if (document.getElementById('court-body')) courtPanelLoad(true); } catch (x) {} });
         es.addEventListener('courtlock', function () { try { courtCheck(); } catch (x) {} });
@@ -14250,6 +14797,8 @@ function flGoTo(code) {
         }
         if (code === 'hcatt' && ME.isHighCommand) { renderHighCommandPanel(); hcTabSwitch('att', document.querySelectorAll('.tabs .tab')[2]); return true; }
         if (code === 'court' && ME.courtStaff) { renderCourtPanel(); return true; }
+        if (code === 'fraud' && ME.canFraud) { renderFraudPanel(); return true; }
+        if (code === 'certs') { renderCertPage(); return true; }
     } catch (e) {}
     renderDashboard();
     return true;
@@ -14917,11 +15466,13 @@ function buildNav() {
         { label: '🌴 الإجازات', fn: 'renderLeavePage()' },
         { label: '🩺 غياب بعذر', fn: 'renderExcusePage()' },
         { label: '🪪 بطاقتي', fn: 'renderCard()' },
+        { label: '📜 الشهادات', fn: 'renderCertPage()' },
     );
     if (ME.isAdmin) items.push({ label: '🛠️ لوحة الإدارة', fn: 'renderAdmin()' });
     if (ME.isHighCommand) items.push({ label: '⭐ القيادة العليا', fn: 'renderHighCommandPanel()' });
     if (ME.cyber && (ME.cyber.isMember || ME.cyber.isLeader)) items.push({ label: '🛡️ الأمن السيبراني', fn: 'renderCyberPanel()' });
     if (ME.isViolationsOfficer) items.push({ label: '⚖️ مسؤول المخالفات', fn: 'renderViolationsOfficerPanel()' });
+    if (ME.canFraud) items.push({ label: '🛡️ كشف التلاعب', fn: 'renderFraudPanel()' });
     if (ME.sectorViolOfficer) items.push({ label: '⚖️ مخالفات القطاع', fn: 'renderSectorViolOfficerPanel()' });
     if (ME.canAttView) items.push({ label: '🖐️ التحضير', fn: 'renderAttViewPanel()' });
     if (ME.mpInfo) items.push({ label: '🚔 لوحة الشرطة العسكرية', fn: 'renderMPPanel()' });
@@ -17115,7 +17666,7 @@ async function sfView(discord) {
             '<div class="id-card" style="margin-top:16px;"><div class="center" style="font-size:18px;font-weight:bold;color:var(--gold-soft);">' + cardEsc(p.registeredName || p.discordTag) + '</div>' +
             '<div class="center" style="font-size:12px;color:var(--muted);margin-bottom:10px;">ملف عسكري</div>' +
             '<table><tr><td>اليونت</td><td>' + cardEsc(p.unit || '-') + '</td></tr><tr><td>الرتبة</td><td>' + cardEsc(p.rank) + '</td></tr></table>' + notes + '</div>' +
-            sfExtra(d);
+            sfExtra(d) + certFileBlock(d.certs || [], p.discord);
     } catch (e) { box.innerHTML = '<div class="card" style="color:#f87171;">' + cardEsc(e.message) + '</div>'; }
 }
 function attPaintReception(d) {
@@ -17187,6 +17738,185 @@ async function loadHCHistory() {
     if (hcTab !== 'history') return;
     if (data.list.length === 0) { box.innerHTML = '<div class="card center" style="color:var(--muted);">لا يوجد سجل بعد</div>'; return; }
     box.innerHTML = data.list.map(r => hcCard(r, false)).join('');
+}
+
+// ===================== 🛡️ كشف التلاعب + 📜 الشهادات (واجهة) =====================
+var FR_TAB = 'open';
+function renderFraudPanel() {
+    document.getElementById('app').innerHTML =
+        '<div class="card row"><h2>🛡️ كشف التلاعب في المخالفات</h2><button class="btn gray sm" onclick="renderDashboard()">رجوع</button></div>' +
+        '<div class="card" style="color:var(--muted);font-size:13px;line-height:1.8;">النظام يعلّم المخالفات المشبوهة (صورة مكررة، تسجيل بسرعة غير منطقية، تكرار لوحة/مخالفة) وينبّه القيادة العليا ومسؤولي المخالفات والكبار. ما يتخذ أي إجراء تلقائي — تتفاهمون مع العسكري وبعدها تضغطون «تم التفاهم».</div>' +
+        '<div class="card row" style="gap:8px;justify-content:flex-start;"><button id="fr-t-open" class="btn sm" data-t="open" onclick="frTab(this.dataset.t)">مفتوحة</button>' +
+        '<button id="fr-t-resolved" class="btn gray sm" data-t="resolved" onclick="frTab(this.dataset.t)">تمت معالجتها</button></div><div id="fr-list"></div>';
+    FR_TAB = 'open';
+    frLoad();
+}
+function frTab(t) {
+    FR_TAB = t;
+    var a = document.getElementById('fr-t-open'), b = document.getElementById('fr-t-resolved');
+    if (a) a.className = 'btn sm' + (t === 'open' ? '' : ' gray');
+    if (b) b.className = 'btn sm' + (t === 'resolved' ? '' : ' gray');
+    frLoad();
+}
+async function frLoad() {
+    var box = document.getElementById('fr-list');
+    if (!box) return;
+    box.innerHTML = '<div class="card">جارِ التحميل...</div>';
+    var d;
+    try { d = await api('/api/fraud/alerts?status=' + FR_TAB); }
+    catch (e) { box.innerHTML = '<div class="card" style="color:#f87171;">تعذر التحميل (' + accEsc(e.message) + ')</div>'; return; }
+    if (!d.list.length) { box.innerHTML = '<div class="card center" style="color:var(--muted);">' + (FR_TAB === 'open' ? '✅ ما فيه تنبيهات مفتوحة' : 'ما فيه تنبيهات معالجة') + '</div>'; return; }
+    box.innerHTML = d.list.map(function (a) {
+        var flags = (a.flags || []).map(function (f) {
+            return '<div style="margin-top:6px;color:#fbbf24;">' + accEsc(f.label) + ' <span style="color:var(--muted);font-size:13px;">— ' + accEsc(f.detail || '') + '</span>' +
+                (f.refId ? ' <button class="btn sm gray" data-id="' + accEsc(f.refId) + '" onclick="viewViolationPhoto(this.dataset.id)">📷 الأصلية</button>' : '') + '</div>';
+        }).join('');
+        var act = a.status === 'open'
+            ? '<button class="btn sm" data-id="' + a._id + '" onclick="frResolve(this.dataset.id)">✅ تم التفاهم</button>'
+            : '<div style="font-size:12px;color:var(--muted);">عولج بواسطة ' + accEsc(a.resolvedByName || '-') + (a.resolveNote ? ' — ' + accEsc(a.resolveNote) : '') + '</div>';
+        return '<div class="card"><div class="row" style="align-items:flex-start;"><div><b>' + accEsc(a.reporterName || '-') + '</b> <span style="color:var(--muted);font-size:12px;">(' + accEsc(a.reporterUnit || '-') + ')</span>' +
+            '<div style="font-size:12px;color:var(--muted);margin-top:2px;">' + new Date(a.createdAt).toLocaleString('ar-SA') + '</div>' + flags + '</div>' +
+            '<div style="display:flex;flex-direction:column;gap:6px;align-items:flex-start;"><button class="btn sm gray" data-id="' + accEsc(a.violationId) + '" onclick="viewViolationPhoto(this.dataset.id)">📷 صورة المخالفة</button>' + act + '</div></div></div>';
+    }).join('');
+}
+async function frResolve(id) {
+    var note = await promptModal('ملاحظة عن التفاهم مع العسكري (اختياري):');
+    if (note === null) return;
+    try { await api('/api/fraud/alerts/' + id + '/resolve', { method: 'POST', body: JSON.stringify({ note: note }) }); toast('✅ تمت المعالجة'); frLoad(); }
+    catch (e) { toast(e.message); }
+}
+function frBadgeHtml(v) {
+    if (!v || !v.fraudFlags || !v.fraudFlags.length) return '';
+    return '<div style="margin-top:6px;padding:6px 8px;border:1px solid #ef4444;border-radius:8px;background:rgba(239,68,68,.1);font-size:12px;color:#fca5a5;">🛡️ تلاعب محتمل: ' +
+        v.fraudFlags.map(function (f) { return accEsc(f.label) + (f.detail ? ' (' + accEsc(f.detail) + ')' : ''); }).join(' • ') + '</div>';
+}
+
+// ---------- الشهادات ----------
+var CERT_TM = null, CERT_SEL = null, CERT_SF = null;
+function certKindLbl(k) { return k === 'points' ? 'كشف نقاط' : 'شهادة خدمة'; }
+function certRowHtml(c, canRevoke) {
+    var dt = new Date(c.createdAt).toLocaleDateString('ar-SA');
+    return '<div style="background:rgba(5,15,10,0.6);padding:10px;border-radius:8px;margin-top:6px;font-size:13px;display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;align-items:center;">' +
+        '<div><b>' + certKindLbl(c.kind) + '</b>' + (c.name ? ' — ' + accEsc(c.name) : '') + '<div style="color:var(--muted);font-size:12px;">' + dt + ' • ' + accEsc(c.issuedByRole || '') + ' • <span dir="ltr">' + accEsc(c.code) + '</span>' +
+        (c.status === 'revoked' ? ' • <span style="color:#f87171;">ملغاة</span>' : '') + '</div></div>' +
+        '<div style="display:flex;gap:6px;">' + (c.status === 'revoked' && !canRevoke ? '' : '<a class="btn sm" target="_blank" href="/cert/' + accEsc(c.code) + '">📄 عرض / PDF</a>') +
+        (canRevoke && c.status !== 'revoked' ? '<button class="btn danger sm" data-c="' + accEsc(c.code) + '" onclick="certRevoke(this.dataset.c)">🗑️ سحب</button>' : '') + '</div></div>';
+}
+function certFileBlock(list, discord) {
+    CERT_SF = discord;
+    return '<div class="id-card" style="margin-top:16px;"><div style="font-size:15px;font-weight:bold;color:var(--gold-soft);margin-bottom:6px;">📜 الشهادات الصادرة (' + (list ? list.length : 0) + ')</div>' +
+        ((list && list.length) ? list.map(function (c) { return certRowHtml(c, true); }).join('') : '<div style="color:var(--muted);font-size:13px;">ما فيه شهادات</div>') + '</div>';
+}
+async function renderCertPage() {
+    var issuer = !!(ME && ME.canIssueCert);
+    document.getElementById('app').innerHTML =
+        '<div class="card row"><h2>📜 الشهادات الرسمية</h2><button class="btn gray sm" onclick="renderDashboard()">رجوع</button></div>' +
+        '<div class="card"><h3>شهاداتي</h3><div id="cert-mine">جارِ التحميل...</div></div>' +
+        (issuer ? '<div class="card"><h3>إصدار شهادة لعسكري</h3><input id="cert-q" placeholder="ابحث بالاسم أو رقم البطاقة أو اليونت..." oninput="certSearch()"><div id="cert-res"></div><div id="cert-sel"></div></div>' +
+            '<div class="card"><h3>آخر الشهادات الصادرة</h3><div id="cert-recent">جارِ التحميل...</div></div>' : '') +
+        ((ME && ME.isOwner) ? '<div class="card" id="cert-assets"><h3>🖋️ التواقيع والأختام (المالك)</h3><div id="cert-assets-body">جارِ التحميل...</div></div>' : '');
+    certLoadMine();
+    if (issuer) certLoadRecent();
+    if (ME && ME.isOwner) certAssetsLoad();
+}
+async function certLoadMine() {
+    var box = document.getElementById('cert-mine');
+    if (!box) return;
+    try { var d = await api('/api/certs/mine'); box.innerHTML = d.list.length ? d.list.map(function (c) { return certRowHtml(c, false); }).join('') : '<div style="color:var(--muted);">ما صدرت لك أي شهادة بعد. القيادة هي اللي تصدرها لك.</div>'; }
+    catch (e) { box.innerHTML = '<span style="color:#f87171;">' + accEsc(e.message) + '</span>'; }
+}
+async function certLoadRecent() {
+    var box = document.getElementById('cert-recent');
+    if (!box) return;
+    try { var d = await api('/api/certs/recent'); box.innerHTML = d.list.length ? d.list.map(function (c) { return certRowHtml(c, true); }).join('') : '<div style="color:var(--muted);">ما صدرت شهادات بعد</div>'; }
+    catch (e) { box.innerHTML = '<span style="color:#f87171;">' + accEsc(e.message) + '</span>'; }
+}
+function certSearch() {
+    clearTimeout(CERT_TM);
+    CERT_TM = setTimeout(async function () {
+        var q = (document.getElementById('cert-q') || {}).value || '', box = document.getElementById('cert-res');
+        if (!box) return;
+        if (q.trim().length < 2) { box.innerHTML = ''; return; }
+        try {
+            var d = await api('/api/certs/search?q=' + encodeURIComponent(q.trim()));
+            box.innerHTML = d.list.length ? d.list.map(function (p) {
+                return '<button class="btn gray sm" style="margin:4px 4px 0 0;" data-d="' + accEsc(p.discord) + '" data-n="' + accEsc(p.name) + '" onclick="certPick(this.dataset.d, this.dataset.n)">' + accEsc(p.name) + ' • ' + accEsc(p.rank || '-') + '</button>';
+            }).join('') : '<div style="color:var(--muted);margin-top:6px;">ما لقيت أحد</div>';
+        } catch (e) { box.innerHTML = '<span style="color:#f87171;">' + accEsc(e.message) + '</span>'; }
+    }, 300);
+}
+async function certPick(discord, name) {
+    CERT_SEL = discord; CERT_SF = discord;
+    var box = document.getElementById('cert-sel');
+    if (!box) return;
+    box.innerHTML = '<div style="margin-top:12px;"><b>' + accEsc(name) + '</b></div>' +
+        '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px;"><button class="btn sm" data-k="service" onclick="certIssue(this.dataset.k)">📜 إصدار شهادة خدمة</button><button class="btn sm" data-k="points" onclick="certIssue(this.dataset.k)">⭐ إصدار كشف نقاط</button></div>' +
+        '<div id="cert-member" style="margin-top:10px;">جارِ التحميل...</div>';
+    certLoadMember();
+}
+async function certLoadMember() {
+    var box = document.getElementById('cert-member');
+    if (!box || !CERT_SEL) return;
+    try { var d = await api('/api/certs/member/' + encodeURIComponent(CERT_SEL)); box.innerHTML = '<div style="font-size:13px;color:var(--gold-soft);">شهادات في ملفه (' + d.list.length + '):</div>' + (d.list.length ? d.list.map(function (c) { return certRowHtml(c, true); }).join('') : '<div style="color:var(--muted);font-size:13px;">ما فيه شهادات</div>'); }
+    catch (e) { box.innerHTML = '<span style="color:#f87171;">' + accEsc(e.message) + '</span>'; }
+}
+async function certIssue(kind) {
+    if (!CERT_SEL) return;
+    try {
+        var d = await api('/api/certs/issue', { method: 'POST', body: JSON.stringify({ discord: CERT_SEL, kind: kind }) });
+        toast('✅ تم إصدار الشهادة وتسجيلها في ملفه');
+        certLoadMember(); certLoadRecent();
+        var box = document.getElementById('cert-member');
+        if (box) box.insertAdjacentHTML('afterbegin', '<a class="btn sm" target="_blank" href="' + accEsc(d.url) + '">📄 فتح الشهادة الجديدة</a>');
+    } catch (e) { toast(e.message); }
+}
+async function certRevoke(code) {
+    if (!confirm('تأكد: سحب هذي الشهادة من ملف العسكري؟ (بتظهر "ملغاة" عند مسح الباركود)')) return;
+    try {
+        await api('/api/certs/' + encodeURIComponent(code) + '/revoke', { method: 'POST' });
+        toast('تم سحب الشهادة');
+        if (document.getElementById('cert-member')) certLoadMember();
+        if (document.getElementById('cert-recent')) certLoadRecent();
+        if (document.getElementById('sf-view') && CERT_SF) sfView(CERT_SF);
+    } catch (e) { toast(e.message); }
+}
+async function certAssetsLoad() {
+    var box = document.getElementById('cert-assets-body');
+    if (!box) return;
+    try {
+        var d = await api('/api/owner/cert-assets');
+        var keys = [['presSig', 'توقيع ' + d.presName], ['presStamp', 'ختم ' + d.presName], ['vpSig', 'توقيع ' + d.vpName], ['vpStamp', 'ختم ' + d.vpName]];
+        box.innerHTML = '<div style="color:var(--muted);font-size:12px;margin-bottom:8px;">بدون رفع صور تطلع تواقيع وأختام مرسومة تلقائياً. ارفع صورة (PNG بخلفية شفافة أفضل) لتحل محلها.</div>' +
+            '<label>اسم رئيس السيرفر</label><input id="cert-n-pres" value="' + accEsc(d.presName) + '">' +
+            '<label>اسم نائب رئيس السيرفر</label><input id="cert-n-vp" value="' + accEsc(d.vpName) + '">' +
+            '<button class="btn sm" style="margin:8px 0;" onclick="certSaveNames()">حفظ الأسماء</button>' +
+            keys.map(function (k) {
+                return '<div style="margin-top:8px;font-size:13px;">' + accEsc(k[1]) + ' ' + (d.has[k[0]] ? '<span style="color:#4ade80;">✔ مرفوع</span> <button class="btn danger sm" data-k="' + k[0] + '" onclick="certAssetClear(this.dataset.k)">إزالة</button>' : '<span style="color:var(--muted);">(افتراضي)</span>') +
+                '<input type="file" accept="image/png,image/jpeg,image/webp" data-k="' + k[0] + '" onchange="certAssetUpload(this)"></div>';
+            }).join('');
+    } catch (e) { box.innerHTML = '<span style="color:#f87171;">' + accEsc(e.message) + '</span>'; }
+}
+async function certSaveNames() {
+    try {
+        await api('/api/owner/cert-assets', { method: 'POST', body: JSON.stringify({ key: 'presName', value: document.getElementById('cert-n-pres').value }) });
+        await api('/api/owner/cert-assets', { method: 'POST', body: JSON.stringify({ key: 'vpName', value: document.getElementById('cert-n-vp').value }) });
+        toast('✅ تم الحفظ'); certAssetsLoad();
+    } catch (e) { toast(e.message); }
+}
+function certAssetUpload(inp) {
+    var f = inp.files && inp.files[0];
+    if (!f) return;
+    if (f.size > 1000000) { toast('الصورة أكبر من 1MB'); inp.value = ''; return; }
+    var r = new FileReader();
+    r.onload = async function () {
+        try { await api('/api/owner/cert-assets', { method: 'POST', body: JSON.stringify({ key: inp.dataset.k, image: r.result }) }); toast('✅ تم الرفع'); certAssetsLoad(); }
+        catch (e) { toast(e.message); }
+    };
+    r.readAsDataURL(f);
+}
+async function certAssetClear(k) {
+    try { await api('/api/owner/cert-assets', { method: 'POST', body: JSON.stringify({ key: k, image: null }) }); toast('تمت الإزالة'); certAssetsLoad(); }
+    catch (e) { toast(e.message); }
 }
 
 function renderSectorPanel() {
@@ -18986,7 +19716,7 @@ function voDetails(v) {
         h += '<div style="color:var(--gold-soft);margin-top:4px;">' + accEsc(v.violationType) + '</div>' +
             '<div style="color:var(--muted);font-size:13px;">المركبة: ' + accEsc(v.vehicle) + ' • اللوحة: ' + accEsc(v.plateNumber) + '</div>';
     }
-    return h;
+    return h + frBadgeHtml(v);
 }
 async function loadVOPending() {
     const box = document.getElementById('vo-content');
