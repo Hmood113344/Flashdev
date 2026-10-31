@@ -3508,6 +3508,14 @@ app.get("/api/card-photos/pending", ensureAnyAdmin, async (req, res) => {
         return { uid: r.uid, name: r.name, rank: p.rank || "", sectorLabel: (p.sector && CONFIG.SECTORS[p.sector]) || p.unit || "", cardNumber: p.cardNumber || "", createdAt: r.createdAt };
     }) });
 });
+// البطاقات الموجودة (صورها معتمدة)
+app.get("/api/card-photos/approved", ensureAnyAdmin, async (req, res) => {
+    try {
+        const hidden = hiddenOwnerIds(req);
+        const ps = await Personnel.find({ cardPhotoV: { $gt: 0 }, discord: { $nin: hidden } }, { discord: 1, registeredName: 1, rank: 1, sector: 1, unit: 1, cardNumber: 1, cardPhotoV: 1 }).sort({ cardPhotoV: -1 }).limit(300).lean();
+        res.json({ list: ps.map(p => ({ uid: p.discord, name: p.registeredName || "", rank: p.rank || "", sectorLabel: (p.sector && CONFIG.SECTORS[p.sector]) || p.unit || "", cardNumber: p.cardNumber || "", v: p.cardPhotoV || 0 })) });
+    } catch (e) { res.status(500).json({ error: "تعذر تحميل البطاقات" }); }
+});
 app.post("/api/card-photos/:uid/approve", ensureAnyAdmin, async (req, res) => {
     try {
         const uid = String(req.params.uid || "");
@@ -19561,19 +19569,31 @@ async function loadCardPhotoTab() {
     const box = document.getElementById('admin-content');
     if (!box) return;
     box.innerHTML = '<div class="card center" style="color:var(--muted);">جارِ التحميل...</div>';
-    let d;
-    try { d = await api('/api/card-photos/pending', { noLock: true }); }
+    let d, d2;
+    try {
+        const rs = await Promise.all([
+            api('/api/card-photos/pending', { noLock: true }),
+            api('/api/card-photos/approved', { noLock: true }).catch(function () { return { list: [] }; })
+        ]);
+        d = rs[0]; d2 = rs[1];
+    }
     catch (e) { if (currentAdminTab === 'cphoto') box.innerHTML = '<div class="card" style="color:#f87171;">' + cardEsc(e.message) + '</div>'; return; }
     if (currentAdminTab !== 'cphoto') return;
     const list = d.list || [];
-    if (!list.length) { box.innerHTML = '<div class="card center" style="color:var(--muted);">ما فيه صور بطاقات بانتظار المراجعة ✅</div>'; return; }
+    const okList = (d2 && d2.list) || [];
+    const okHtml = '<div class="card" style="margin-top:18px;"><h2>✅ البطاقات الموجودة (' + okList.length + ')</h2></div>' + (okList.length ? okList.map(function (r) {
+        return '<div class="card" style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;">' +
+            '<img src="/api/card-photo/' + encodeURIComponent(r.uid) + '?v=' + encodeURIComponent(r.v) + '" alt="" onclick="window.open(this.src)" style="width:72px;height:84px;object-fit:cover;border-radius:10px;cursor:pointer;">' +
+            '<div style="flex:1;min-width:140px;"><b>' + cardEsc(r.name) + '</b><div style="font-size:12px;color:var(--muted);margin-top:4px;">' + cardEsc([r.rank, r.sectorLabel, r.cardNumber].filter(Boolean).join(' • ')) + '</div></div></div>';
+    }).join('') : '<div class="card center" style="color:var(--muted);">ما فيه بطاقات بصور معتمدة للحين</div>');
+    if (!list.length) { box.innerHTML = '<div class="card center" style="color:var(--muted);">ما فيه صور بطاقات بانتظار المراجعة ✅</div>' + okHtml; return; }
     box.innerHTML = '<div class="card"><h2>🖼️ صور البطاقات بانتظار المراجعة (' + list.length + ')</h2></div>' + list.map(function (r) {
         return '<div class="card" style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;">' +
             '<img src="/api/card-photo-pending/' + encodeURIComponent(r.uid) + '?t=' + encodeURIComponent(r.createdAt) + '" alt="" onclick="window.open(this.src)" style="width:96px;height:111px;object-fit:cover;border-radius:10px;cursor:pointer;">' +
             '<div style="flex:1;min-width:140px;"><b>' + cardEsc(r.name) + '</b><div style="font-size:12px;color:var(--muted);margin-top:4px;">' + cardEsc([r.rank, r.sectorLabel, r.cardNumber].filter(Boolean).join(' • ')) + '</div></div>' +
             '<div class="row" style="gap:6px;"><button class="btn sm" data-u="' + cardEsc(r.uid) + '" onclick="cpReview(this.dataset.u, true)">✅ قبول</button>' +
             '<button class="btn danger sm" data-u="' + cardEsc(r.uid) + '" onclick="cpReview(this.dataset.u, false)">❌ رفض</button></div></div>';
-    }).join('');
+    }).join('') + okHtml;
 }
 async function cpReview(uid, ok) {
     try {
@@ -19606,7 +19626,7 @@ function mcInfoHtml(id) {
         if ((r[0] === 'excused' || r[0] === 'removed') && f[r[0]] === null) return;
         info += '<div class="mc-row"><div class="mc-row-top"><span>' + r[1] + '</span><button class="mc-copy" onclick="mcCopy(this)">📋 نسخ</button></div><b data-k="' + r[0] + '">' + cardEsc(f[r[0]]) + '</b></div>';
     });
-    if (id === 'me-card') info += cpSectionHtml();
+    if (id === 'me-card' || id === 'home-card') info += cpSectionHtml();
     const remain = o.hasProgress ? '<div class="mc-remain">' + remainText(o.nextRank, o.remaining) + '</div>' : '';
     return '<div class="mc-wrap unlocked" data-mc="' + id + '">' +
         '<div class="mcard" onclick="mcTap(this)">' + mcFace(f) + '</div>' + mcAdminTag(f) +
