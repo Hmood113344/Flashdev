@@ -12810,6 +12810,10 @@ function runViolationPhoto(id) {
     img.onerror = function () { clearTimeout(t1); img.onload = img.onerror = null; fallback(); };
     img.src = '/api/violations/' + encodeURIComponent(id) + '/photo-file?t=' + Date.now();
 }
+function viewCardPhoto(src) {
+    openPhotoPage();
+    setPhotoPageImage(src);
+}
 async function viewNotePhoto(discord, noteId) {
     openPhotoPage();
     try {
@@ -19652,14 +19656,14 @@ async function loadCardPhotoTab() {
     const okList = (d2 && d2.list) || [];
     const okHtml = '<div class="card" style="margin-top:18px;"><h2>✅ البطاقات الموجودة (' + okList.length + ')</h2></div>' + (okList.length ? okList.map(function (r) {
         return '<div class="card" style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;">' +
-            '<img src="/api/card-photo/' + encodeURIComponent(r.uid) + '?v=' + encodeURIComponent(r.v) + '" alt="" onclick="window.open(this.src)" style="width:72px;height:84px;object-fit:cover;border-radius:10px;cursor:pointer;">' +
+            '<img src="/api/card-photo/' + encodeURIComponent(r.uid) + '?v=' + encodeURIComponent(r.v) + '" alt="" onclick="viewCardPhoto(this.src)" style="width:72px;height:84px;object-fit:cover;border-radius:10px;cursor:pointer;">' +
             '<div style="flex:1;min-width:140px;"><b>' + cardEsc(r.name) + '</b><div style="font-size:12px;color:var(--muted);margin-top:4px;">' + cardEsc([r.rank, r.sectorLabel, r.cardNumber].filter(Boolean).join(' • ')) + '</div></div>' +
             '<div class="row" style="gap:6px;"><button class="btn danger sm" data-u="' + cardEsc(r.uid) + '" onclick="cpDelete(this.dataset.u)">🗑️ حذف الصورة</button></div></div>';
     }).join('') : '<div class="card center" style="color:var(--muted);">ما فيه بطاقات بصور معتمدة للحين</div>');
     if (!list.length) { box.innerHTML = '<div class="card center" style="color:var(--muted);">ما فيه صور بطاقات بانتظار المراجعة ✅</div>' + okHtml; return; }
     box.innerHTML = '<div class="card"><h2>🖼️ صور البطاقات بانتظار المراجعة (' + list.length + ')</h2></div>' + list.map(function (r) {
         return '<div class="card" style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;">' +
-            '<img src="/api/card-photo-pending/' + encodeURIComponent(r.uid) + '?t=' + encodeURIComponent(r.createdAt) + '" alt="" onclick="window.open(this.src)" style="width:96px;height:111px;object-fit:cover;border-radius:10px;cursor:pointer;">' +
+            '<img src="/api/card-photo-pending/' + encodeURIComponent(r.uid) + '?t=' + encodeURIComponent(r.createdAt) + '" alt="" onclick="viewCardPhoto(this.src)" style="width:96px;height:111px;object-fit:cover;border-radius:10px;cursor:pointer;">' +
             '<div style="flex:1;min-width:140px;"><b>' + cardEsc(r.name) + '</b><div style="font-size:12px;color:var(--muted);margin-top:4px;">' + cardEsc([r.rank, r.sectorLabel, r.cardNumber].filter(Boolean).join(' • ')) + '</div></div>' +
             '<div class="row" style="gap:6px;"><button class="btn sm" data-u="' + cardEsc(r.uid) + '" onclick="cpReview(this.dataset.u, true)">✅ قبول</button>' +
             '<button class="btn danger sm" data-u="' + cardEsc(r.uid) + '" onclick="cpReview(this.dataset.u, false)">❌ رفض</button></div></div>';
