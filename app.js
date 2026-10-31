@@ -297,6 +297,8 @@ const PersonnelSchema = new mongoose.Schema({
     leaveBalance: { type: Number, default: 10 },
     cardNumber: { type: String, default: null, index: true },
     cardPhotoV: { type: Number, default: 0 },
+    cardRevoked: { type: Boolean, default: false, index: true },
+    cardRevokedAt: { type: Date, default: null }, cardRevokedBy: { type: String, default: null }, cardRevokedByName: { type: String, default: null }, cardRevokedReason: { type: String, default: null },
     sector: { type: String, default: null },
     wasUnassigned: { type: Boolean, default: false },
     createdAt: { type: Date, default: Date.now }
@@ -2776,6 +2778,7 @@ app.get("/api/me", ensureAuth, async (req, res) => {
         cardNumber: p.cardNumber,
         cardAdmin: !!(isAdmin || isHighCommand(req.user.id, settings)),
         cardPhotoV: p.cardPhotoV || 0,
+        cardRevoked: !!p.cardRevoked,
         cardPhotoStatus: meCpReq ? meCpReq.status : null,
         cardPhotoReason: meCpReq ? meCpReq.rejectReason : null,
         cardKey: (() => {
@@ -3199,7 +3202,7 @@ function certPublic(c) {
         issuedByName: c.issuedByName, issuedByRole: c.issuedByRole, status: c.status, createdAt: c.createdAt, revokedByName: c.revokedByName, revokedAt: c.revokedAt };
 }
 async function certListFor(discord) {
-    const list = await Certificate.find({ targetDiscord: discord, status: "active" }).sort({ createdAt: -1 }).limit(100).lean();
+    const list = await Certificate.find({ targetDiscord: discord }).sort({ createdAt: -1 }).limit(100).lean();
     return list.map(certPublic);
 }
 async function certBuildData(p, settings, note) {
@@ -3353,7 +3356,7 @@ function certPageHtml(c, assets, forPrint, baseUrl) {
         (forPrint === false ? "" : '<div class="bar"><button class="back" onclick="if(history.length>1){history.back()}else{location.href=\'/?go=certs\'}">↩️ رجوع</button><span>📜 ' + certEsc(kindLbl) + '</span><button onclick="window.print()">🖨️ طباعة / حفظ PDF</button></div>') +
         '<div class="page"><div class="frame">' + (revoked ? '<div class="wm">ملغاة</div>' : '') +
         '<div class="hd"><div class="org">' + certEsc(CONFIG.SITE_NAME) + '</div><div class="sub">الإدارة العامة للسيرفر — وثيقة رسمية</div></div>' +
-        '<div class="title">' + certEsc(kindLbl) + '</div><div class="no">رقم الوثيقة: <b dir="ltr">' + certEsc(c.code) + '</b></div>' + body +
+        '<div class="title">' + certEsc(kindLbl) + '</div><div class="no">رقم الوثيقة: <b dir="ltr">' + certEsc(c.code) + '</b></div>' + (revoked ? '<div style="text-align:center;margin:10px 0 0;"><span style="display:inline-block;background:#fee2e2;color:#b91c1c;border:1.5px solid #b91c1c;border-radius:10px;padding:5px 18px;font-weight:800;font-size:16px;">⚠️ هذي الوثيقة ملغاة ولا يُعتدّ بها</span></div>' : '') + body +
         '<div class="sigs">' +
         '<div class="sig"><div class="box"><div class="st">' + (assets.vpStamp ? certAssetImg(assets.vpStamp, 100) : certStampSvg(CERT_DEFAULTS.vpTitle, "#b91c1c")) + '</div>' + (assets.vpSig ? certAssetImg(assets.vpSig, 70) : certSigSvg(2)) + '</div><div class="nm">' + certEsc(vpName) + '</div><div class="tt">' + certEsc(CERT_DEFAULTS.vpTitle) + '</div></div>' +
         '<div class="qr"><a href="' + certEsc(url) + '" target="_blank" rel="noopener" style="display:block;color:inherit;text-decoration:none;">' + qr + '<div class="cap">امسح الرمز أو اضغط عليه للتحقق من صحة الوثيقة</div></a></div>' +
@@ -3381,7 +3384,6 @@ app.get("/cert/:code", async (req, res) => {
         const c = CERT_CODE_RE.test(code) ? await Certificate.findOne({ code }).lean() : null;
         if (!c) return res.status(404).send("الشهادة غير موجودة");
         if (c.targetDiscord !== req.user.id && !(await certIssuerRole(req.user.id))) return res.status(403).send("غير مصرح");
-        if (c.status === "revoked" && c.targetDiscord === req.user.id && !(await certIssuerRole(req.user.id))) return res.status(404).send("هذي الشهادة تم سحبها");
         res.set("Cache-Control", "no-store").type("html").send(certPageHtml(c, await certAssetsNow(), true, certBaseUrl(req)));
     } catch (e) { res.status(500).send("خطأ"); }
 });
@@ -3425,6 +3427,7 @@ app.get("/verify-card/:num", async (req, res) => {
     } catch (e) {}
     let status, color, icon, msg;
     if (!p || !p.registeredName) { p = null; status = "غير موجودة"; color = "#b91c1c"; icon = "❌"; msg = "لا توجد بطاقة بهذا الرقم في سجلات " + CONFIG.SITE_NAME + ". احذر من البطاقات المزوّرة."; }
+    else if (p.cardRevoked) { status = "ملغاة"; color = "#b45309"; icon = "⚠️"; msg = "هذي البطاقة كانت صادرة ثم تم إلغاؤها، ولا يُعتدّ بها."; }
     else if (p.isDismissed) { status = "مفصولة من الخدمة"; color = "#b91c1c"; icon = "⛔"; msg = "صاحب هذي البطاقة مفصول من الخدمة، ولا يُعتدّ بها."; }
     else if (p.isBlocked || (acc && acc.suspended)) { status = "موقوفة مؤقتاً"; color = "#b45309"; icon = "⚠️"; msg = "صاحب هذي البطاقة موقوف حالياً."; }
     else { status = "سارية وصحيحة"; color = "#15803d"; icon = "✅"; msg = "هذي بطاقة عسكرية صادرة رسمياً من " + CONFIG.SITE_NAME + "."; }
@@ -3515,6 +3518,65 @@ app.get("/api/card-photos/approved", ensureAnyAdmin, async (req, res) => {
         const ps = await Personnel.find({ cardPhotoV: { $gt: 0 }, discord: { $nin: hidden } }, { discord: 1, registeredName: 1, rank: 1, sector: 1, unit: 1, cardNumber: 1, cardPhotoV: 1 }).sort({ cardPhotoV: -1 }).limit(300).lean();
         res.json({ list: ps.map(p => ({ uid: p.discord, name: p.registeredName || "", rank: p.rank || "", sectorLabel: (p.sector && CONFIG.SECTORS[p.sector]) || p.unit || "", cardNumber: p.cardNumber || "", v: p.cardPhotoV || 0 })) });
     } catch (e) { res.status(500).json({ error: "تعذر تحميل البطاقات" }); }
+});
+// حذف صورة معتمدة (تنشال من البطاقة)
+app.post("/api/card-photos/:uid/delete", ensureAnyAdmin, async (req, res) => {
+    try {
+        const uid = String(req.params.uid || "");
+        if (!CARD_UID_RE.test(uid)) return res.status(404).json({ error: "غير موجود" });
+        await CardImg.deleteMany({ key: { $in: [uid + ":approved", uid + ":pending"] } });
+        await CardPhotoReq.deleteOne({ uid });
+        await Personnel.updateOne({ discord: uid }, { $set: { cardPhotoV: 0 } });
+        await logEvent({ action: "حذف صورة بطاقة", discordId: uid, actorId: req.user.id, actorTag: req.user.username, details: "حذف صورة البطاقة المعتمدة" });
+        res.json({ ok: true });
+    } catch (e) { console.error("❌ حذف صورة بطاقة:", e.message); res.status(500).json({ error: "تعذر حذف الصورة" }); }
+});
+
+// ===================== 🪪 تحكم البطاقات (كبار المسؤولين): إلغاء البطاقة / إعادة تفعيلها =====================
+function ensureSeniorOnly(req, res, next) {
+    if (!req.isAuthenticated || !req.isAuthenticated()) return res.status(401).json({ error: "غير مسجّل دخول" });
+    if (!isSeniorAdmin(req.user.id)) return res.status(403).json({ error: "ليست لديك صلاحية" });
+    next();
+}
+function cardCtlRow(p) {
+    return { uid: p.discord, name: p.registeredName || "", rank: p.rank || "", sectorLabel: (p.sector && CONFIG.SECTORS[p.sector]) || p.unit || "", cardNumber: p.cardNumber || "",
+        revoked: !!p.cardRevoked, revokedAt: p.cardRevokedAt || null, revokedByName: p.cardRevokedByName || null, reason: p.cardRevokedReason || null };
+}
+const CARD_CTL_FIELDS = { discord: 1, registeredName: 1, rank: 1, sector: 1, unit: 1, cardNumber: 1, cardRevoked: 1, cardRevokedAt: 1, cardRevokedByName: 1, cardRevokedReason: 1 };
+app.get("/api/card-control/list", ensureSeniorOnly, async (req, res) => {
+    try {
+        const q = String(req.query.q || "").trim();
+        const hidden = hiddenOwnerIds(req);
+        let filter;
+        if (q.length >= 2) {
+            const rx = new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
+            filter = { registeredName: { $ne: null }, discord: { $nin: hidden }, $or: [{ registeredName: rx }, { discordTag: rx }, { cardNumber: rx }, { unit: rx }] };
+        } else filter = { cardRevoked: true, discord: { $nin: hidden } };
+        const list = await Personnel.find(filter, CARD_CTL_FIELDS).sort({ cardRevokedAt: -1 }).limit(q.length >= 2 ? 30 : 200).lean();
+        res.json({ list: list.map(cardCtlRow), searching: q.length >= 2 });
+    } catch (e) { res.status(500).json({ error: "تعذر تحميل البطاقات" }); }
+});
+app.post("/api/card-control/:uid/revoke", ensureSeniorOnly, async (req, res) => {
+    try {
+        const uid = String(req.params.uid || "");
+        if (!CARD_UID_RE.test(uid)) return res.status(404).json({ error: "غير موجود" });
+        const me = await Personnel.findOne({ discord: req.user.id }, { registeredName: 1 }).lean();
+        const reason = String((req.body && req.body.reason) || "").trim().slice(0, 200) || null;
+        const r = await Personnel.updateOne({ discord: uid }, { $set: { cardRevoked: true, cardRevokedAt: new Date(), cardRevokedBy: req.user.id, cardRevokedByName: (me && me.registeredName) || "كبار المسؤولين", cardRevokedReason: reason } });
+        if (!r.matchedCount) return res.status(404).json({ error: "غير موجود" });
+        await logEvent({ action: "إلغاء بطاقة", discordId: uid, actorId: req.user.id, actorTag: req.user.username, details: "إلغاء البطاقة العسكرية" + (reason ? " — " + reason : "") });
+        res.json({ ok: true });
+    } catch (e) { res.status(500).json({ error: "تعذر إلغاء البطاقة" }); }
+});
+app.post("/api/card-control/:uid/restore", ensureSeniorOnly, async (req, res) => {
+    try {
+        const uid = String(req.params.uid || "");
+        if (!CARD_UID_RE.test(uid)) return res.status(404).json({ error: "غير موجود" });
+        const r = await Personnel.updateOne({ discord: uid }, { $set: { cardRevoked: false, cardRevokedAt: null, cardRevokedBy: null, cardRevokedByName: null, cardRevokedReason: null } });
+        if (!r.matchedCount) return res.status(404).json({ error: "غير موجود" });
+        await logEvent({ action: "إعادة تفعيل بطاقة", discordId: uid, actorId: req.user.id, actorTag: req.user.username, details: "إعادة تفعيل البطاقة العسكرية" });
+        res.json({ ok: true });
+    } catch (e) { res.status(500).json({ error: "تعذر إعادة التفعيل" }); }
 });
 app.post("/api/card-photos/:uid/approve", ensureAnyAdmin, async (req, res) => {
     try {
@@ -11820,6 +11882,7 @@ app.get("/", (req, res) => {
     .mc-t { position: absolute; color: #0f172a; font-weight: 800; font-size: 3.5cqw; line-height: 1.25; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-align: right; direction: rtl; text-shadow: 0 0 3px rgba(255,255,255,0.95), 0 0 6px rgba(255,255,255,0.8); transform: translateY(-50%); }
     .mc-t { padding-right: 0.7cqw; box-sizing: border-box; }
     .mc-t.num { direction: ltr; text-align: right; letter-spacing: 0.14em; text-shadow: 0 0 3px rgba(255,255,255,0.95); }
+    .mc-revoked { position: absolute; inset: 0; z-index: 3; display: flex; align-items: center; justify-content: center; font-size: 15cqw; font-weight: 800; color: rgba(220,38,38,0.55); transform: rotate(-18deg); pointer-events: none; text-shadow: 0 0 1cqw rgba(255,255,255,0.8); }
     .mc-photo { position: absolute; object-fit: cover; border-radius: 0.8cqw; background: #e5e7eb; }
     .mc-bc { position: absolute; display: flex; align-items: center; justify-content: flex-start; cursor: pointer; z-index: 1; -webkit-tap-highlight-color: transparent; text-decoration: none; }
     .mc-bc img { height: 100%; aspect-ratio: 1; background: #fff; padding: 0.3cqw; border-radius: 0.6cqw; box-shadow: 0 0 0 0.25cqw rgba(15,23,42,0.35); }
@@ -16548,6 +16611,7 @@ function renderAdmin(startTab) {
             <div class="tab" onclick="adminTab('sectors', this)">قادة القطاعات</div>
             <div class="tab" onclick="adminTab('regs', this)">📥 طلبات التسجيل</div>
             <div class="tab" id="tab-cphoto" onclick="adminTab('cphoto', this)">🖼️ صور البطاقات</div>
+            <div class="tab" id="tab-cards" onclick="adminTab('cards', this)">🪪 تحكم البطاقات</div>
             <div class="tab" onclick="adminTab('accounts', this)">✅ الحسابات المقبولة</div>
             <div class="tab" onclick="adminTab('personnel', this)">ملفات العسكريين</div>
             <div class="tab" onclick="adminTab('sfile', this)">📇 عرض ملف عسكري</div>
@@ -16585,6 +16649,7 @@ function adminTab(name, el) {
     if (name === 'sectors') loadSectors();
     if (name === 'regs') loadRegs();
     if (name === 'cphoto') loadCardPhotoTab();
+    if (name === 'cards') loadCardsTab();
     if (name === 'accounts') loadAccounts();
     if (name === 'personnel') loadPersonnel();
     if (name === 'vehicles') loadVehicles();
@@ -18049,7 +18114,7 @@ function certRowHtml(c, canRevoke) {
     return '<div style="background:rgba(5,15,10,0.6);padding:10px;border-radius:8px;margin-top:6px;font-size:13px;display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;align-items:center;">' +
         '<div><b>' + accEsc(c.kindLabel || certKindLbl(c.kind)) + '</b>' + (c.name ? ' — ' + accEsc(c.name) : '') + '<div style="color:var(--muted);font-size:12px;">' + dt + ' • ' + accEsc(c.issuedByRole || '') + ' • <span dir="ltr">' + accEsc(c.code) + '</span>' +
         (c.status === 'revoked' ? ' • <span style="color:#f87171;">ملغاة</span>' : '') + '</div></div>' +
-        '<div style="display:flex;gap:6px;">' + (c.status === 'revoked' && !canRevoke ? '' : '<a class="btn sm" target="_blank" href="/cert/' + accEsc(c.code) + '">📄 عرض / PDF</a>') +
+        '<div style="display:flex;gap:6px;">' + ('<a class="btn sm" target="_blank" href="/cert/' + accEsc(c.code) + '">📄 عرض / PDF</a>') +
         (canRevoke && c.status !== 'revoked' ? '<button class="btn danger sm" data-c="' + accEsc(c.code) + '" onclick="certRevoke(this.dataset.c)">🗑️ سحب</button>' : '') + '</div></div>';
 }
 function certFileBlock(list, discord) {
@@ -19442,6 +19507,7 @@ function cardFields(p) {
     return {
         key: key,
         admin: !!(p.cardAdmin && SECTOR_LABELS[key]),
+        revoked: !!p.cardRevoked,
         avatar: p.cardPhotoV ? '/api/card-photo/' + (p.discord || p.discordId) + '?v=' + p.cardPhotoV : null,
         division: (p.sector && SECTOR_LABELS[p.sector]) || p.unit || '-',
         name: p.registeredName || p.discordTag || '-',
@@ -19502,6 +19568,7 @@ function mcFace(f) {
         t('num', L.rows[3], f.num, 'num') +
         photo + bc +
         (f.admin ? '<div class="mc-adm-in" style="right:' + L.adm[0] + '%;top:' + L.adm[1] + '%;">إداري</div>' : '') +
+        (f.revoked ? '<div class="mc-revoked">ملغاة</div>' : '') +
     '</div>';
 }
 function cardBlock(p, o) {
@@ -19584,7 +19651,8 @@ async function loadCardPhotoTab() {
     const okHtml = '<div class="card" style="margin-top:18px;"><h2>✅ البطاقات الموجودة (' + okList.length + ')</h2></div>' + (okList.length ? okList.map(function (r) {
         return '<div class="card" style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;">' +
             '<img src="/api/card-photo/' + encodeURIComponent(r.uid) + '?v=' + encodeURIComponent(r.v) + '" alt="" onclick="window.open(this.src)" style="width:72px;height:84px;object-fit:cover;border-radius:10px;cursor:pointer;">' +
-            '<div style="flex:1;min-width:140px;"><b>' + cardEsc(r.name) + '</b><div style="font-size:12px;color:var(--muted);margin-top:4px;">' + cardEsc([r.rank, r.sectorLabel, r.cardNumber].filter(Boolean).join(' • ')) + '</div></div></div>';
+            '<div style="flex:1;min-width:140px;"><b>' + cardEsc(r.name) + '</b><div style="font-size:12px;color:var(--muted);margin-top:4px;">' + cardEsc([r.rank, r.sectorLabel, r.cardNumber].filter(Boolean).join(' • ')) + '</div></div>' +
+            '<div class="row" style="gap:6px;"><button class="btn danger sm" data-u="' + cardEsc(r.uid) + '" onclick="cpDelete(this.dataset.u)">🗑️ حذف الصورة</button></div></div>';
     }).join('') : '<div class="card center" style="color:var(--muted);">ما فيه بطاقات بصور معتمدة للحين</div>');
     if (!list.length) { box.innerHTML = '<div class="card center" style="color:var(--muted);">ما فيه صور بطاقات بانتظار المراجعة ✅</div>' + okHtml; return; }
     box.innerHTML = '<div class="card"><h2>🖼️ صور البطاقات بانتظار المراجعة (' + list.length + ')</h2></div>' + list.map(function (r) {
@@ -19606,6 +19674,70 @@ async function cpReview(uid, ok) {
         toast(ok ? 'تم قبول الصورة ✅' : 'تم رفض الصورة');
         loadCardPhotoTab();
     } catch (e) { toast(e.message || 'صار خطأ'); }
+}
+async function cpDelete(uid) {
+    if (!confirm('تأكد: حذف صورة هذي البطاقة؟ بترجع البطاقة بدون صورة.')) return;
+    try {
+        await api('/api/card-photos/' + encodeURIComponent(uid) + '/delete', { method: 'POST', body: JSON.stringify({}) });
+        toast('تم حذف الصورة');
+        loadCardPhotoTab();
+    } catch (e) { toast(e.message || 'صار خطأ'); }
+}
+// ===== تاب تحكم البطاقات (كبار المسؤولين): إلغاء البطاقة / إعادة تفعيلها =====
+var CC_TM = null;
+function cardsRowHtml(r) {
+    var dt = r.revokedAt ? new Date(r.revokedAt).toLocaleDateString('ar-SA') : '';
+    return '<div class="card" style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;">' +
+        '<div style="flex:1;min-width:150px;"><b>' + cardEsc(r.name) + '</b> ' + (r.revoked ? '<span style="color:#f87171;font-weight:700;">• ملغاة</span>' : '<span style="color:#4ade80;">• سارية</span>') +
+        '<div style="font-size:12px;color:var(--muted);margin-top:4px;">' + cardEsc([r.rank, r.sectorLabel, r.cardNumber].filter(Boolean).join(' • ')) + '</div>' +
+        (r.revoked ? '<div style="font-size:12px;color:var(--muted);margin-top:2px;">أُلغيت ' + cardEsc(dt) + (r.revokedByName ? ' بواسطة ' + cardEsc(r.revokedByName) : '') + (r.reason ? ' — ' + cardEsc(r.reason) : '') + '</div>' : '') + '</div>' +
+        '<div class="row" style="gap:6px;flex-wrap:wrap;">' +
+        (r.revoked
+            ? '<button class="btn sm" data-u="' + cardEsc(r.uid) + '" onclick="cardCtl(this.dataset.u, false)">♻️ إعادة تفعيل</button>'
+            : '<button class="btn danger sm" data-u="' + cardEsc(r.uid) + '" onclick="cardCtl(this.dataset.u, true)">🚫 إلغاء البطاقة</button>') +
+        (r.cardNumber ? '<a class="btn gray sm" target="_blank" href="/verify-card/' + cardEsc(r.cardNumber) + '">🔍 صفحة التحقق</a>' +
+            '<button class="btn gray sm" data-n="' + cardEsc(r.cardNumber) + '" onclick="cardCtlCopy(this.dataset.n)">📋 نسخ رقم البطاقة</button>' : '') +
+        '</div></div>';
+}
+async function loadCardsTab() {
+    var box = document.getElementById('admin-content');
+    if (!box) return;
+    box.innerHTML = '<div class="card"><h2>🪪 تحكم البطاقات</h2><input id="cc-q" placeholder="ابحث بالاسم أو رقم البطاقة أو اليونت لإلغاء بطاقة..." oninput="cardsSearch()" style="margin-top:8px;"></div><div id="cc-list"><div class="card center" style="color:var(--muted);">جارِ التحميل...</div></div>';
+    cardsSearch(true);
+}
+function cardsSearch(now) {
+    clearTimeout(CC_TM);
+    CC_TM = setTimeout(async function () {
+        var inp = document.getElementById('cc-q'), out = document.getElementById('cc-list');
+        if (!inp || !out) return;
+        var q = inp.value.trim();
+        try {
+            var d = await api('/api/card-control/list?q=' + encodeURIComponent(q), { noLock: true });
+            if (currentAdminTab !== 'cards' || !document.getElementById('cc-list')) return;
+            var list = d.list || [];
+            var head = d.searching ? '' : '<div class="card"><h3>🚫 البطاقات الملغاة (' + list.length + ')</h3></div>';
+            out.innerHTML = head + (list.length ? list.map(cardsRowHtml).join('') : '<div class="card center" style="color:var(--muted);">' + (d.searching ? 'ما لقيت أحد' : 'ما فيه بطاقات ملغاة ✅ — ابحث فوق عشان تلغي بطاقة') + '</div>');
+        } catch (e) { out.innerHTML = '<div class="card" style="color:#f87171;">' + cardEsc(e.message) + '</div>'; }
+    }, now === true ? 0 : 300);
+}
+async function cardCtl(uid, revoke) {
+    try {
+        if (revoke) {
+            var reason = await promptModal('سبب إلغاء البطاقة (اختياري):', '');
+            if (reason === null || reason === undefined || reason === false) return;
+            await api('/api/card-control/' + encodeURIComponent(uid) + '/revoke', { method: 'POST', body: JSON.stringify({ reason: String(reason) }) });
+            toast('تم إلغاء البطاقة');
+        } else {
+            if (!confirm('إعادة تفعيل هذي البطاقة؟')) return;
+            await api('/api/card-control/' + encodeURIComponent(uid) + '/restore', { method: 'POST', body: JSON.stringify({}) });
+            toast('تمت إعادة تفعيل البطاقة ✅');
+        }
+        cardsSearch(true);
+    } catch (e) { toast(e.message || 'صار خطأ'); }
+}
+function cardCtlCopy(n) {
+    try { navigator.clipboard.writeText(String(n)).then(function () { toast('اننسخ رقم البطاقة 📋'); }, function () { toast(String(n)); }); }
+    catch (e) { toast(String(n)); }
 }
 function mcTap(el) {
     const w = el.closest('.mc-wrap');
