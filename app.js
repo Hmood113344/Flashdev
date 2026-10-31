@@ -11554,7 +11554,7 @@ app.get("/", (req, res) => {
     .nav-links { display: flex; gap: 0.3rem; list-style: none; flex-wrap: wrap; }
     .nav-links button { background: transparent; border: 1px solid transparent; color: #94a3b8; padding: 0.4rem 0.8rem; border-radius: 8px; cursor: pointer; font-family: inherit; font-size: 0.85rem; transition: all 0.2s; }
     .nav-links button:hover { background: rgba(59,130,246,0.2); border-color: #3b82f6; color: #60a5fa; }
-    .hamburger-btn { display: none; background: rgba(59,130,246,0.15); border: 1px solid #3b82f6; color: #60a5fa; padding: 0.4rem 0.7rem; border-radius: 8px; cursor: pointer; font-size: 1.2rem; }
+    .hamburger-btn { display: inline-block; background: rgba(59,130,246,0.15); border: 1px solid #3b82f6; color: #60a5fa; padding: 0.4rem 0.7rem; border-radius: 8px; cursor: pointer; font-size: 1.2rem; }
     .mobile-menu { display: none; position: fixed; top: 99px; left: 0; width: 230px; background: rgba(5,15,30,0.98); border: 1px solid rgba(59,130,246,0.35); border-radius: 0 0 14px 0; z-index: 950; padding: 8px 0; box-shadow: 4px 8px 30px rgba(0,0,0,0.7); max-height: calc(100vh - 110px); max-height: calc(100dvh - 110px); overflow-y: auto; -webkit-overflow-scrolling: touch; overscroll-behavior: contain; }
     .mobile-menu.open { display: block; }
     #menu-backdrop { display: none; position: fixed; inset: 0; z-index: 940; background: rgba(0,0,0,0.3); touch-action: none; }
@@ -11562,7 +11562,7 @@ app.get("/", (req, res) => {
     html.menu-open #menu-backdrop { display: block; }
     .mobile-menu button { display: block; width: 100%; background: transparent; border: none; border-bottom: 1px solid rgba(59,130,246,0.08); color: #94a3b8; padding: 12px 20px; text-align: right; font-family: inherit; font-size: 0.9rem; cursor: pointer; }
     .mobile-menu button:hover { background: rgba(59,130,246,0.18); color: #60a5fa; }
-    @media (max-width: 760px) { .nav-links { display: none !important; } .hamburger-btn { display: inline-block; } }
+    .nav-links { display: none !important; }
     .wrap { max-width: 940px; margin: 0 auto; padding: 20px 16px 60px; }
     .card { background: var(--panel); border: 1px solid var(--border); border-radius: 14px; padding: 20px; margin-bottom: 18px; box-shadow: 0 4px 20px rgba(0,0,0,0.4); }
     h1, h2, h3 { color: var(--gold-soft); margin-bottom: 12px; }
