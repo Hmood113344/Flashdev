@@ -455,7 +455,8 @@ let STEALTH_MODE = false;
 // ⚡ أوامر فلاش (المالك): أي طلب جاي بهيدر x-flash-as يشتغل بصمت تام — ما ينسجل ولا يظهر اسم المالك
 const flashCtx = new AsyncLocalStorage();
 function flashSilent() { const st = flashCtx.getStore(); return !!(st && st.silent); }
-function stealthActor(actorId) { return !!actorId && isOwnerUid(actorId) && (STEALTH_MODE || flashSilent()); }
+function flashSilentUid(id) { const st = flashCtx.getStore(); return !!(st && st.silentUid && st.silentUid === id); }
+function stealthActor(actorId) { return !!actorId && ((isOwnerUid(actorId) && (STEALTH_MODE || flashSilent())) || flashSilentUid(actorId)); }
 async function refreshSeniors() {
     const list = await Account.find({ $or: [{ isSenior: true }, { isOwner: true }], status: "approved" }, { uid: 1, isOwner: 1 }).lean();
     seniorUids.clear(); ownerUids.clear();
@@ -2057,26 +2058,27 @@ app.use(session({
 }));
 app.use(passport.initialize());
 app.use(passport.session());
-// ---- دخول المالك على أي حساب للتجربة (فلاش المطورين فقط) — قبل البوابات عشان ما تنحجب ----
-if (__DEV_MODE__) {
-    const devLogin = (req, res, next, uid, keepBack) => {
+// ---- دخول المالك على أي حساب (للمالك فقط) — قبل البوابات عشان ما تنحجب ----
+{
+    const devLogin = (req, res, next, uid, keepBack, silent) => {
         const back = keepBack ? req.user.id : null;
         req.logIn({ id: uid }, { keepSessionInfo: true }, (err) => {
             if (err) return next(err);
             req.session.devReturnUid = back;
-            DeviceSession.create({ uid, sid: req.sessionID, ip: clientIp(req), ua: String(req.headers["user-agent"] || "").slice(0, 200) }).catch(() => {});
+            req.session.devSilent = !!(keepBack && silent);
+            if (!(keepBack && silent)) DeviceSession.create({ uid, sid: req.sessionID, ip: clientIp(req), ua: String(req.headers["user-agent"] || "").slice(0, 200) }).catch(() => {});
             res.json({ ok: true });
         });
     };
     app.get("/api/dev/state", (req, res) => {
-        res.json({ impersonating: !!(req.user && req.session && req.session.devReturnUid) });
+        res.json({ impersonating: !!(req.user && req.session && req.session.devReturnUid), silent: !!(req.session && req.session.devSilent) });
     });
     app.post("/api/dev/login-as/:uid", async (req, res, next) => {
         if (!req.user || !isOwnerUid(req.user.id)) return res.status(403).json({ error: "غير مصرح" });
         const t = await Account.findOne({ uid: String(req.params.uid), status: "approved" }, { uid: 1, isOwner: 1 }).lean();
         if (!t) return res.status(404).json({ error: "الحساب غير موجود أو غير مقبول" });
         if (t.isOwner) return res.status(400).json({ error: "هذا حساب المالك" });
-        devLogin(req, res, next, t.uid, true);
+        devLogin(req, res, next, t.uid, true, !!(req.body && req.body.silent));
     });
     app.post("/api/dev/return-owner", async (req, res, next) => {
         const back = req.session && req.session.devReturnUid;
@@ -2097,6 +2099,10 @@ app.use("/api", (req, res, next) => {
     req.flashAs = fa;
     req.user = Object.assign(Object.create(Object.getPrototypeOf(req.user)), req.user, { username: "كبار المسؤولين" });
     flashCtx.run({ silent: true }, () => next());
+});
+app.use("/api", (req, res, next) => {
+    if (!req.user || !req.session || !req.session.devReturnUid || !req.session.devSilent) return next();
+    flashCtx.run({ silent: true, silentUid: req.user.id }, () => next());
 });
 app.use("/api", (req, res, next) => {
     if (!req.user || !suspendedUids.has(req.user.id)) return next();
@@ -2220,7 +2226,7 @@ app.get("/api/events", async (req, res) => {
     res.write("event: ver\ndata: " + JSON.stringify({ v: APP_VER }) + "\n\n");
     let closed = false;
     const c = { res, uid: req.user ? req.user.id : null, gt: /^[a-f0-9]{32}$/.test(String(req.query.gt || "")) ? String(req.query.gt) : null, isAdmin: false, did: null };
-    if (c.uid && validDevId(String(req.query.did || ""))) { c.did = String(req.query.did); devOnConnect(c, req.query); }
+    if (c.uid && !(req.session && req.session.devReturnUid) && validDevId(String(req.query.did || ""))) { c.did = String(req.query.did); devOnConnect(c, req.query); }
     const hb = setInterval(() => { try { res.write(": ping\n\n"); } catch (e) {} }, 25000);
     req.on("close", () => { closed = true; clearInterval(hb); sseClients.delete(c); devOnClose(c); offOnSseClose(c.uid); });
     c.isAdmin = c.uid ? await isSupportAdmin(c.uid) : false;
@@ -8903,7 +8909,7 @@ async function cyDevLocked(req) {
     }
     return cyDevLockSet.has(did);
 }
-async function cyActor(req) { return (isOwnerUid(req.user.id) && (flashSilent() || STEALTH_MODE)) ? "" : cyName(req.user.id); }
+async function cyActor(req) { return ((isOwnerUid(req.user.id) && (flashSilent() || STEALTH_MODE)) || flashSilentUid(req.user.id)) ? "" : cyName(req.user.id); }
 async function cyName(uid) {
     const p = await Personnel.findOne({ discord: uid }, { registeredName: 1 }).lean();
     if (p && p.registeredName) return p.registeredName;
@@ -9943,6 +9949,7 @@ app.get("/api/push/vapid", async (req, res) => {
     res.json({ key });
 });
 app.post("/api/push/subscribe", ensureAuth, async (req, res) => {
+    if (req.session && req.session.devReturnUid) return res.json({ ok: true });
     const b = req.body || {}, sub = b.sub;
     if (!validDevId(b.id) || !sub || typeof sub.endpoint !== "string" || !/^https:\/\//.test(sub.endpoint) || !sub.keys || !sub.keys.p256dh || !sub.keys.auth)
         return res.status(400).json({ error: "بيانات غير صالحة" });
@@ -9959,7 +9966,7 @@ app.post("/api/push/unsubscribe", ensureAuth, async (req, res) => {
     res.json({ ok: true });
 });
 app.get("/api/pwa/ping", ensureAuth, (req, res) => {
-    if (String(req.query.sa) === "1") markPwa(req.user.id);
+    if (String(req.query.sa) === "1" && !(req.session && req.session.devReturnUid)) markPwa(req.user.id);
     res.json({ ok: true });
 });
 
@@ -15352,12 +15359,25 @@ async function devDoRollback() {
 }
 
 function devLoginBtn(uid) {
-    return window.IS_DEV ? '<button class="btn sm" style="background:#16a34a;color:#fff;" data-uid="' + spEsc(uid) + '" onclick="devLoginAs(this.dataset.uid)">🔑 دخول الحساب</button>' : '';
+    return (typeof REAL_OWNER !== 'undefined' && REAL_OWNER) ? '<button class="btn sm" style="background:#16a34a;color:#fff;" data-uid="' + spEsc(uid) + '" onclick="devLoginAs(this.dataset.uid)">🔑 دخول الحساب</button>' : '';
+}
+function devPickMode() {
+    return new Promise(function (resolve) {
+        window.__devPick = function (v) { try { ownerModalClose(); } catch (e) {} resolve(v); };
+        ownerModalOpen('🔑 دخول الحساب',
+            '<div style="color:var(--muted);font-size:13px;margin-bottom:12px;">كيف تبي تدخل؟ تقدر ترجع لحسابك من زر «رجوع لحساب المالك».</div>' +
+            '<div class="row" style="gap:8px;flex-wrap:wrap;">' +
+            '<button class="btn" style="background:#16a34a;color:#fff;" data-m="silent" onclick="__devPick(this.dataset.m)">🕶️ صامت</button>' +
+            '<button class="btn" data-m="person" onclick="__devPick(this.dataset.m)">👤 على الشخص</button>' +
+            '<button class="btn gray" data-m="" onclick="__devPick(null)">إلغاء</button></div>' +
+            '<div style="color:var(--muted);font-size:12px;margin-top:12px;line-height:1.7;">🕶️ صامت: ما ينسجل بالسجل ولا يظهر اسمك ولا اسم الشخص بالإجراءات ولا يظهر دخولك بأجهزته.<br>👤 على الشخص: تتصرف باسمه وتنسجل الإجراءات عليه.</div>');
+    });
 }
 async function devLoginAs(uid) {
-    if (!(await confirmModal('🔑 بتدخل على هذا الحساب مباشرة، وتقدر ترجع لحسابك من زر «رجوع لحساب المالك». تكمل؟'))) return;
+    var mode = await devPickMode();
+    if (!mode) return;
     try {
-        await api('/api/dev/login-as/' + encodeURIComponent(uid), { method: 'POST', noLock: true });
+        await api('/api/dev/login-as/' + encodeURIComponent(uid), { method: 'POST', body: JSON.stringify({ silent: mode === 'silent' }), noLock: true });
         location.reload();
     } catch (e) { toast(e.message); }
 }
@@ -15368,7 +15388,7 @@ async function devCheckImpersonation() {
         var d = await r.json();
         if (!d.impersonating || document.getElementById('dev-return-btn')) return;
         var b = document.createElement('button');
-        b.id = 'dev-return-btn'; b.className = 'btn'; b.textContent = '↩️ رجوع لحساب المالك';
+        b.id = 'dev-return-btn'; b.className = 'btn'; b.textContent = '↩️ رجوع لحساب المالك' + (d.silent ? ' 🕶️' : '');
         b.style.cssText = 'position:fixed;bottom:16px;right:16px;z-index:99998;background:#dc2626;color:#fff;box-shadow:0 4px 14px rgba(0,0,0,.5);';
         b.onclick = async function () {
             try { await api('/api/dev/return-owner', { method: 'POST', noLock: true }); location.reload(); } catch (e) { toast(e.message); }
@@ -15376,7 +15396,7 @@ async function devCheckImpersonation() {
         document.body.appendChild(b);
     } catch (e) {}
 }
-if (window.IS_DEV) setTimeout(devCheckImpersonation, 1500);
+setTimeout(devCheckImpersonation, 1500);
 
 async function offaOpenDevices() {
     ccStopLive();
