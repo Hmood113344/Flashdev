@@ -3402,10 +3402,12 @@ app.get("/verify/:code", async (req, res) => {
         '<link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;700;800&display=swap" rel="stylesheet"><style>*{box-sizing:border-box}body{margin:0;background:#0b1f4a;font-family:Tajawal,Cairo,"Segoe UI",Tahoma,Arial,sans-serif;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:16px}' +
         '.c{background:#fffdf7;border-radius:16px;max-width:460px;width:100%;overflow:hidden;box-shadow:0 10px 40px rgba(0,0,0,.4)}.h{background:' + color + ';color:#fff;text-align:center;padding:22px 14px}.h .i{font-size:46px}.h .s{font-size:24px;font-weight:800;margin-top:4px}' +
         '.m{padding:14px 18px;color:#374151;line-height:1.8;text-align:center;font-size:15px;border-bottom:1px solid #eee}.r{display:flex;justify-content:space-between;gap:10px;padding:10px 18px;border-bottom:1px solid #f1f1f1;font-size:15px}.r span{color:#6b7280}.r b{color:#0b1f4a;text-align:left}.f{text-align:center;color:#9ca3af;font-size:12px;padding:12px}</style></head><body>' +
-        '<div class="c"><div class="h"><div class="i">' + icon + '</div><div class="s">' + status + '</div></div><div class="m">' + certEsc(msg) + '</div>' + details + '<div class="f">' + certEsc(CONFIG.SITE_NAME) + ' — نظام التحقق من الوثائق</div></div></body></html>');
+        '<div class="c"><div class="h"><div class="i">' + icon + '</div><div class="s">' + status + '</div></div><div class="m">' + certEsc(msg) + '</div>' + details + VERIFY_BACK_BTN + '<div class="f">' + certEsc(CONFIG.SITE_NAME) + ' — نظام التحقق من الوثائق</div></div></body></html>');
 });
 
 // ===================== 🪪 التحقق من البطاقة العسكرية (يفتحها أي أحد يمسح باركود البطاقة أو يضغط عليه) =====================
+// زر الرجوع بصفحات التحقق (باركود البطاقة والشهادة): يرجع للصفحة اللي قبل، وإذا انفتحت بتبويب جديد يودّي للموقع
+const VERIFY_BACK_BTN = '<div style="padding:14px 18px;text-align:center;"><a href="/" onclick="if(history.length>1){history.back();return false;}" style="display:inline-block;background:#0b1f4a;color:#fff;text-decoration:none;font-weight:800;padding:10px 30px;border-radius:10px;font-size:15px;">🔙 رجوع</a></div>';
 const CARD_NUM_RE = /^[0-9]{8}$/;
 app.get("/card-qr/:num", (req, res) => {
     const n = String(req.params.num || "");
@@ -3433,7 +3435,7 @@ app.get("/verify-card/:num", async (req, res) => {
         '<link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;700;800&display=swap" rel="stylesheet"><style>*{box-sizing:border-box}body{margin:0;background:#0b1f4a;font-family:Tajawal,Cairo,"Segoe UI",Tahoma,Arial,sans-serif;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:16px}' +
         '.c{background:#fffdf7;border-radius:16px;max-width:460px;width:100%;overflow:hidden;box-shadow:0 10px 40px rgba(0,0,0,.4)}.h{background:' + color + ';color:#fff;text-align:center;padding:22px 14px}.h .i{font-size:46px}.h .s{font-size:24px;font-weight:800;margin-top:4px}' +
         '.m{padding:14px 18px;color:#374151;line-height:1.8;text-align:center;font-size:15px;border-bottom:1px solid #eee}.r{display:flex;justify-content:space-between;gap:10px;padding:10px 18px;border-bottom:1px solid #f1f1f1;font-size:15px}.r span{color:#6b7280}.r b{color:#0b1f4a;text-align:left}.f{text-align:center;color:#9ca3af;font-size:12px;padding:12px}</style></head><body>' +
-        '<div class="c"><div class="h"><div class="i">' + icon + '</div><div class="s">' + status + '</div></div><div class="m">' + certEsc(msg) + '</div>' + details + '<div class="f">' + certEsc(CONFIG.SITE_NAME) + ' — نظام التحقق من البطاقات</div></div></body></html>');
+        '<div class="c"><div class="h"><div class="i">' + icon + '</div><div class="s">' + status + '</div></div><div class="m">' + certEsc(msg) + '</div>' + details + VERIFY_BACK_BTN + '<div class="f">' + certEsc(CONFIG.SITE_NAME) + ' — نظام التحقق من البطاقات</div></div></body></html>');
 });
 
 // ===================== 🖼️ صور البطاقات العسكرية (العضو يرفع → الإدارة تراجع → تنزل بالبطاقة) =====================
