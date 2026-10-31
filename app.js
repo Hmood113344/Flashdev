@@ -3621,6 +3621,7 @@ app.post("/api/violations/submit", ensureAuth, async (req, res) => {
         const p = await Personnel.findOne({ discord: req.user.id });
         if (!p || !p.registeredName || !p.unit) return res.status(400).json({ error: "أكمل بياناتك (الاسم واليونت) أولاً" });
         if (p.isBlocked) return res.status(403).json({ error: "أنت موقوف عن تسجيل مخالفات جديدة" });
+        if (p.cardRevoked) return res.status(403).json({ error: "🚫 بطاقتك ملغاة، ما تقدر تسجّل مخالفات جديدة" });
         if (isSummonBlocking(p)) return res.status(403).json({ error: "🚨 عليك استدعاء نشط من الشرطة العسكرية، لازم تدخل الاستدعاء أولاً قبل أي إجراء بالموقع" });
 
         const pendingCount = await Violation.countDocuments({ reporterDiscord: req.user.id, status: "pending" });
@@ -3886,6 +3887,7 @@ app.post("/api/reports/submit", ensureAntiDrugsRole, async (req, res) => {
         const p = await Personnel.findOne({ discord: req.user.id });
         if (!p || !p.registeredName || !p.unit) return res.status(400).json({ error: "أكمل بياناتك (الاسم واليونت) أولاً" });
         if (p.isBlocked) return res.status(403).json({ error: "أنت موقوف عن تسجيل تقارير جديدة" });
+        if (p.cardRevoked) return res.status(403).json({ error: "🚫 بطاقتك ملغاة، ما تقدر تسجّل تقارير جديدة" });
         if (isSummonBlocking(p)) return res.status(403).json({ error: "🚨 عليك استدعاء نشط من الشرطة العسكرية، لازم تدخل الاستدعاء أولاً قبل أي إجراء بالموقع" });
 
         const {
