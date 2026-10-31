@@ -11815,6 +11815,7 @@ app.get("/", (req, res) => {
     .mc-photo { position: absolute; object-fit: cover; border-radius: 0.8cqw; background: #e5e7eb; }
     .mc-bc { position: absolute; display: flex; align-items: center; justify-content: flex-start; cursor: pointer; z-index: 1; -webkit-tap-highlight-color: transparent; text-decoration: none; }
     .mc-bc img { height: 100%; aspect-ratio: 1; background: #fff; padding: 0.3cqw; border-radius: 0.6cqw; box-shadow: 0 0 0 0.25cqw rgba(15,23,42,0.35); }
+    .mc-adm-in { position: absolute; z-index: 1; font-size: 2.1cqw; font-weight: 800; line-height: 1.2; color: #dc2626; background: rgba(255,255,255,0.88); border: 0.2cqw solid #dc2626; border-radius: 99px; padding: 0.15cqw 1.2cqw; pointer-events: none; }
     .mc-adm { text-align: center; margin-top: 8px; font-weight: 800; font-size: 14px; color: #ef4444; }
     .mcard.dbg .mc-t, .mcard.dbg .mc-photo, .mcard.dbg .mc-bc { outline: 1px dashed #d946ef; }
     .mc-cover { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2cqw; background: rgba(15,30,60,0.28); cursor: pointer; z-index: 2; }
@@ -19454,14 +19455,14 @@ const MC_ROWS = [['name', 'الاسم'], ['rank', 'الرتبة'], ['unit', 'ا�
 // rows = مركز صفوف [الاسم، الرتبة، القطاع، رقم البطاقة] عمودياً | gx,gw = بداية وعرض خانات الكتابة
 // photo = [يسار، أعلى، عرض، ارتفاع] لمربع الصورة | bc = [يسار، أعلى، عرض، ارتفاع] لمنطقة الباركود
 const MC_LAYOUT = {
-    mp:           { rows: [36.5, 46.2, 55.9, 66.3], gx: 26.1, gw: 23.6, photo: [78.3, 27.3, 18.1, 36.8], bc: [23.4, 76.1, 52.0, 12.9] },
-    patrol:       { rows: [34.8, 44.5, 54.6, 64.4], gx: 26.1, gw: 23.8, photo: [78.8, 26.2, 19.0, 35.5], bc: [23.4, 73.8, 53.0, 13.0] },
-    antiDrugs:    { rows: [35.6, 45.4, 55.4, 65.6], gx: 24.7, gw: 24.0, photo: [77.5, 26.5, 18.1, 36.6], bc: [20.5, 75.4, 53.4, 12.5] },
-    roadSecurity: { rows: [35.0, 45.2, 55.4, 65.4], gx: 24.2, gw: 24.3, photo: [77.6, 25.6, 18.6, 37.3], bc: [20.5, 74.4, 55.0, 13.4] },
-    cyber:        { rows: [36.5, 46.2, 55.9, 66.3], gx: 26.1, gw: 23.6, photo: [78.3, 27.3, 18.1, 36.8], bc: [23.4, 76.1, 52.0, 12.9] },
-    admin:        { rows: [36.5, 46.2, 55.9, 66.3], gx: 26.1, gw: 23.6, photo: [78.3, 27.3, 18.1, 36.8], bc: [23.4, 76.1, 52.0, 12.9] },
-    highCommand:  { rows: [36.5, 46.2, 55.9, 66.3], gx: 26.1, gw: 23.6, photo: [78.3, 27.3, 18.1, 36.8], bc: [23.4, 76.1, 52.0, 12.9] },
-    default:      { rows: [36.5, 46.2, 55.9, 66.3], gx: 26.1, gw: 23.6, photo: [78.3, 27.3, 18.1, 36.8], bc: [23.4, 76.1, 52.0, 12.9] }
+    mp:           { rows: [36.5, 46.2, 55.9, 66.3], gx: 26.1, gw: 23.6, photo: [78.3, 27.3, 18.1, 36.8], bc: [23.4, 76.1, 52.0, 12.9], adm: [23.5, 71.3] },
+    patrol:       { rows: [34.8, 44.5, 54.6, 64.4], gx: 26.1, gw: 23.8, photo: [78.8, 26.2, 19.0, 35.5], bc: [23.4, 73.8, 53.0, 13.0], adm: [23.5, 69.0] },
+    antiDrugs:    { rows: [35.6, 45.4, 55.4, 65.6], gx: 24.7, gw: 24.0, photo: [77.5, 26.5, 18.1, 36.6], bc: [20.5, 75.4, 53.4, 12.5], adm: [23.5, 70.6] },
+    roadSecurity: { rows: [35.0, 45.2, 55.4, 65.4], gx: 24.2, gw: 24.3, photo: [77.6, 25.6, 18.6, 37.3], bc: [20.5, 74.4, 55.0, 13.4], adm: [23.5, 69.6] },
+    cyber:        { rows: [36.5, 46.2, 55.9, 66.3], gx: 26.1, gw: 23.6, photo: [78.3, 27.3, 18.1, 36.8], bc: [23.4, 76.1, 52.0, 12.9], adm: [23.5, 71.3] },
+    admin:        { rows: [36.5, 46.2, 55.9, 66.3], gx: 26.1, gw: 23.6, photo: [78.3, 27.3, 18.1, 36.8], bc: [23.4, 76.1, 52.0, 12.9], adm: [23.5, 71.3] },
+    highCommand:  { rows: [36.5, 46.2, 55.9, 66.3], gx: 26.1, gw: 23.6, photo: [78.3, 27.3, 18.1, 36.8], bc: [23.4, 76.1, 52.0, 12.9], adm: [23.5, 71.3] },
+    default:      { rows: [36.5, 46.2, 55.9, 66.3], gx: 26.1, gw: 23.6, photo: [78.3, 27.3, 18.1, 36.8], bc: [23.4, 76.1, 52.0, 12.9], adm: [23.5, 71.3] }
 };
 const MC_BG_V = '1';
 function cardKeyOf(p) {
@@ -19484,7 +19485,7 @@ function mcFace(f) {
     };
     const photo = f.avatar ? '<img class="mc-photo" src="' + cardEsc(f.avatar) + '" alt="" onerror="this.remove()" style="' + box(L.photo) + '">' : '';
     const bc = /^[0-9]{8}$/.test(String(f.num))
-        ? '<a class="mc-bc" href="/verify-card/' + f.num + '" target="_blank" rel="noopener" onclick="event.stopPropagation()" style="' + box(L.bc) + '"><img src="/card-qr/' + f.num + '" alt=""></a>'
+        ? '<a class="mc-bc" href="/verify-card/' + f.num + '" target="_blank" rel="noopener" onclick="event.stopPropagation()" style="' + box(L.bc) + '" aria-label="التحقق من البطاقة"></a>'
         : '';
     return '<div class="mc-face" style="background: url(/card-bg/' + f.key + '?v=' + MC_BG_V + ') center / 100% 100% no-repeat, linear-gradient(135deg, #f4f8f5, #dfe9e3);">' +
         t('name', L.rows[0], f.name, 'name') +
@@ -19492,6 +19493,7 @@ function mcFace(f) {
         t('division', L.rows[2], f.division, 'sector') +
         t('num', L.rows[3], f.num, 'num') +
         photo + bc +
+        (f.admin ? '<div class="mc-adm-in" style="right:' + L.adm[0] + '%;top:' + L.adm[1] + '%;">إداري</div>' : '') +
     '</div>';
 }
 function cardBlock(p, o) {
