@@ -296,6 +296,7 @@ const PersonnelSchema = new mongoose.Schema({
     }],
     leaveBalance: { type: Number, default: 10 },
     cardNumber: { type: String, default: null, index: true },
+    cardPhotoV: { type: Number, default: 0 },
     sector: { type: String, default: null },
     wasUnassigned: { type: Boolean, default: false },
     createdAt: { type: Date, default: Date.now }
@@ -2490,9 +2491,19 @@ async function ensureJuniorInMySector(req, res, discordId) {
 
 const nodePath = require("path");
 const fsCard = require("fs");
-const CARD_BG_CANDIDATES = ["card-bg2.jpg", "card-bg 2.jpg", "card-bg (2).jpg", "card-bg-2.jpg", "card-bg_2.jpg", "card-bg2.jpeg", "card-bg 2.jpeg", "card-bg.jpg"];
-app.get("/card-bg.jpg", (req, res) => {
-    const name = CARD_BG_CANDIDATES.find(n => fsCard.existsSync(nodePath.join(__dirname, n)));
+// خلفيات البطاقات: لكل قطاع ملف صورة بجانب app.js باسم card-<المفتاح>.jpg
+// المفاتيح: patrol / roadSecurity / antiDrugs / mp / cyber / admin / highCommand / default
+const CARD_KEYS = ["patrol", "roadSecurity", "antiDrugs", "mp", "cyber", "admin", "highCommand", "default"];
+function cardBgFile(key) {
+    const names = [];
+    for (const k of [key, key.toLowerCase()]) for (const ext of ["jpg", "jpeg", "png", "webp"]) names.push("card-" + k + "." + ext);
+    if (key === "default") names.push("card-bg.jpg", "card-bg2.jpg");
+    return names.find(n => fsCard.existsSync(nodePath.join(__dirname, n))) || null;
+}
+app.get("/card-bg/:key", (req, res) => {
+    const key = String(req.params.key || "");
+    if (!CARD_KEYS.includes(key)) return res.status(404).end();
+    const name = cardBgFile(key);
     if (!name) return res.status(404).end();
     res.sendFile(nodePath.join(__dirname, name), { maxAge: "5m" }, (err) => {
         if (err && !res.headersSent) res.status(404).end();
@@ -2751,6 +2762,7 @@ app.get("/api/me", ensureAuth, async (req, res) => {
     ]);
     const mePwa = !!mePwaDoc;
     if (senior && meAcc) { accountEmail = meAcc.email; seniorTemp = !!meAcc.tempSenior; }
+    const meCpReq = await CardPhotoReq.findOne({ uid: req.user.id }, { status: 1, rejectReason: 1 }).lean().catch(() => null);
     res.json({
         blocked: false,
         att: meAtt, attRequired: attRequired(req.user.id), pwaInstalled: mePwa,
@@ -2762,6 +2774,16 @@ app.get("/api/me", ensureAuth, async (req, res) => {
         avatar: req.user.avatar ? `https://cdn.discordapp.com/avatars/${req.user.id}/${req.user.avatar}.png` : null,
         registeredName: p.registeredName,
         cardNumber: p.cardNumber,
+        cardAdmin: !!(isAdmin || isHighCommand(req.user.id, settings)),
+        cardPhotoV: p.cardPhotoV || 0,
+        cardPhotoStatus: meCpReq ? meCpReq.status : null,
+        cardPhotoReason: meCpReq ? meCpReq.rejectReason : null,
+        cardKey: (() => {
+            const s = (meAcc && meAcc.sector) || p.sector || null;
+            if (s && CONFIG.SECTORS[s]) return s;
+            if (isHighCommand(req.user.id, settings)) return "highCommand";
+            return isAdmin ? "admin" : "default";
+        })(),
         sector: (meAcc && meAcc.sector) || p.sector || null,
         unit: p.unit,
         rank: p.rank,
@@ -3334,7 +3356,7 @@ function certPageHtml(c, assets, forPrint, baseUrl) {
         '<div class="title">' + certEsc(kindLbl) + '</div><div class="no">رقم الوثيقة: <b dir="ltr">' + certEsc(c.code) + '</b></div>' + body +
         '<div class="sigs">' +
         '<div class="sig"><div class="box"><div class="st">' + (assets.vpStamp ? certAssetImg(assets.vpStamp, 100) : certStampSvg(CERT_DEFAULTS.vpTitle, "#b91c1c")) + '</div>' + (assets.vpSig ? certAssetImg(assets.vpSig, 70) : certSigSvg(2)) + '</div><div class="nm">' + certEsc(vpName) + '</div><div class="tt">' + certEsc(CERT_DEFAULTS.vpTitle) + '</div></div>' +
-        '<div class="qr">' + qr + '<div class="cap">امسح الرمز للتحقق من صحة الوثيقة</div></div>' +
+        '<div class="qr"><a href="' + certEsc(url) + '" target="_blank" rel="noopener" style="display:block;color:inherit;text-decoration:none;">' + qr + '<div class="cap">امسح الرمز أو اضغط عليه للتحقق من صحة الوثيقة</div></a></div>' +
         '<div class="sig"><div class="box"><div class="st">' + (assets.presStamp ? certAssetImg(assets.presStamp, 100) : certStampSvg(CERT_DEFAULTS.presTitle, "#1d3a8a")) + '</div>' + (assets.presSig ? certAssetImg(assets.presSig, 70) : certSigSvg(1)) + '</div><div class="nm">' + certEsc(presName) + '</div><div class="tt">' + certEsc(CERT_DEFAULTS.presTitle) + '</div></div>' +
         '</div><div class="meta"><span>تاريخ الإصدار: ' + certDate(c.createdAt) + '</span><span>أصدرها: ' + certEsc(c.issuedByRole || "") + '</span><span dir="ltr">' + certEsc(url) + '</span></div>' +
         '</div></div></body></html>';
@@ -3381,6 +3403,136 @@ app.get("/verify/:code", async (req, res) => {
         '.c{background:#fffdf7;border-radius:16px;max-width:460px;width:100%;overflow:hidden;box-shadow:0 10px 40px rgba(0,0,0,.4)}.h{background:' + color + ';color:#fff;text-align:center;padding:22px 14px}.h .i{font-size:46px}.h .s{font-size:24px;font-weight:800;margin-top:4px}' +
         '.m{padding:14px 18px;color:#374151;line-height:1.8;text-align:center;font-size:15px;border-bottom:1px solid #eee}.r{display:flex;justify-content:space-between;gap:10px;padding:10px 18px;border-bottom:1px solid #f1f1f1;font-size:15px}.r span{color:#6b7280}.r b{color:#0b1f4a;text-align:left}.f{text-align:center;color:#9ca3af;font-size:12px;padding:12px}</style></head><body>' +
         '<div class="c"><div class="h"><div class="i">' + icon + '</div><div class="s">' + status + '</div></div><div class="m">' + certEsc(msg) + '</div>' + details + '<div class="f">' + certEsc(CONFIG.SITE_NAME) + ' — نظام التحقق من الوثائق</div></div></body></html>');
+});
+
+// ===================== 🪪 التحقق من البطاقة العسكرية (يفتحها أي أحد يمسح باركود البطاقة أو يضغط عليه) =====================
+const CARD_NUM_RE = /^[0-9]{8}$/;
+app.get("/card-qr/:num", (req, res) => {
+    const n = String(req.params.num || "");
+    if (!CARD_NUM_RE.test(n)) return res.status(404).end();
+    const svg = FlashQR.svg(certBaseUrl(req) + "/verify-card/" + n, { size: 160, color: "#0b1f4a" });
+    if (!svg) return res.status(404).end();
+    res.set("Cache-Control", "public, max-age=86400").type("image/svg+xml").send(svg);
+});
+app.get("/verify-card/:num", async (req, res) => {
+    const n = String(req.params.num || "");
+    let p = null, acc = null;
+    try {
+        p = CARD_NUM_RE.test(n) ? await Personnel.findOne({ cardNumber: n }).lean() : null;
+        if (p) acc = await Account.findOne({ uid: p.discord }, { sector: 1, suspended: 1 }).lean();
+    } catch (e) {}
+    let status, color, icon, msg;
+    if (!p || !p.registeredName) { p = null; status = "غير موجودة"; color = "#b91c1c"; icon = "❌"; msg = "لا توجد بطاقة بهذا الرقم في سجلات " + CONFIG.SITE_NAME + ". احذر من البطاقات المزوّرة."; }
+    else if (p.isDismissed) { status = "مفصولة من الخدمة"; color = "#b91c1c"; icon = "⛔"; msg = "صاحب هذي البطاقة مفصول من الخدمة، ولا يُعتدّ بها."; }
+    else if (p.isBlocked || (acc && acc.suspended)) { status = "موقوفة مؤقتاً"; color = "#b45309"; icon = "⚠️"; msg = "صاحب هذي البطاقة موقوف حالياً."; }
+    else { status = "سارية وصحيحة"; color = "#15803d"; icon = "✅"; msg = "هذي بطاقة عسكرية صادرة رسمياً من " + CONFIG.SITE_NAME + "."; }
+    const sec = p ? ((acc && acc.sector) || p.sector || null) : null;
+    const row = (k, v) => '<div class="r"><span>' + k + '</span><b>' + certEsc(v) + '</b></div>';
+    const details = p ? row("الاسم", p.registeredName) + row("الرتبة", p.rank || "-") + row("القطاع", sec ? (CONFIG.SECTORS[sec] || sec) : (p.unit || "-")) + row("رقم البطاقة", p.cardNumber) : "";
+    res.set("Cache-Control", "no-store").type("html").send('<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex"><title>التحقق من البطاقة</title>' +
+        '<link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;700;800&display=swap" rel="stylesheet"><style>*{box-sizing:border-box}body{margin:0;background:#0b1f4a;font-family:Tajawal,Cairo,"Segoe UI",Tahoma,Arial,sans-serif;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:16px}' +
+        '.c{background:#fffdf7;border-radius:16px;max-width:460px;width:100%;overflow:hidden;box-shadow:0 10px 40px rgba(0,0,0,.4)}.h{background:' + color + ';color:#fff;text-align:center;padding:22px 14px}.h .i{font-size:46px}.h .s{font-size:24px;font-weight:800;margin-top:4px}' +
+        '.m{padding:14px 18px;color:#374151;line-height:1.8;text-align:center;font-size:15px;border-bottom:1px solid #eee}.r{display:flex;justify-content:space-between;gap:10px;padding:10px 18px;border-bottom:1px solid #f1f1f1;font-size:15px}.r span{color:#6b7280}.r b{color:#0b1f4a;text-align:left}.f{text-align:center;color:#9ca3af;font-size:12px;padding:12px}</style></head><body>' +
+        '<div class="c"><div class="h"><div class="i">' + icon + '</div><div class="s">' + status + '</div></div><div class="m">' + certEsc(msg) + '</div>' + details + '<div class="f">' + certEsc(CONFIG.SITE_NAME) + ' — نظام التحقق من البطاقات</div></div></body></html>');
+});
+
+// ===================== 🖼️ صور البطاقات العسكرية (العضو يرفع → الإدارة تراجع → تنزل بالبطاقة) =====================
+const CardImgSchema = new mongoose.Schema({
+    key: { type: String, unique: true, index: true }, uid: { type: String, index: true },
+    data: Buffer, mime: { type: String, default: "image/jpeg" }, createdAt: { type: Date, default: Date.now },
+});
+const CardImg = photosDb ? photosDb.model("CardImg", CardImgSchema) : mongoose.model("CardImg", CardImgSchema);
+const CardPhotoReq = mongoose.model("CardPhotoReq", new mongoose.Schema({
+    uid: { type: String, unique: true, index: true }, name: String,
+    status: { type: String, enum: ["pending", "approved", "rejected"], default: "pending", index: true },
+    rejectReason: { type: String, default: null },
+    createdAt: { type: Date, default: Date.now },
+    reviewedBy: { type: String, default: null }, reviewedByTag: { type: String, default: null }, reviewedAt: { type: Date, default: null },
+}));
+const cardPhotoCool = new Map();
+const CARD_UID_RE = /^[0-9]{5,25}$/;
+
+app.post("/api/card-photo", ensureAuth, async (req, res) => {
+    try {
+        const uid = req.user.id;
+        if (Date.now() - (cardPhotoCool.get(uid) || 0) < 15000) return res.status(429).json({ error: "انتظر شوي قبل ما ترفع صورة ثانية" });
+        const p = await Personnel.findOne({ discord: uid }, { registeredName: 1 }).lean();
+        if (!p || !p.registeredName) return res.status(400).json({ error: "أكمل تسجيل بياناتك أولاً" });
+        const raw = String((req.body && req.body.photo) || "");
+        const m = /^data:(image\/(?:jpeg|png|webp));base64,/.exec(raw.slice(0, 40));
+        if (!m) return res.status(400).json({ error: "الملف لازم يكون صورة (jpg / png / webp)" });
+        let buf = Buffer.from(raw.slice(m[0].length), "base64"), mime = m[1];
+        if (!buf.length || buf.length > 6 * 1024 * 1024) return res.status(400).json({ error: "حجم الصورة غير مناسب" });
+        if (sharpLib) {
+            try { buf = await sharpLib(buf).rotate().resize(480, 555, { fit: "cover" }).jpeg({ quality: 82 }).toBuffer(); mime = "image/jpeg"; }
+            catch (e) { return res.status(400).json({ error: "الصورة تالفة أو غير مدعومة" }); }
+        } else if (buf.length > 500 * 1024) return res.status(400).json({ error: "الصورة كبيرة، اختر صورة أصغر" });
+        await CardImg.findOneAndUpdate({ key: uid + ":pending" }, { $set: { uid, data: buf, mime, createdAt: new Date() } }, { upsert: true });
+        await CardPhotoReq.findOneAndUpdate({ uid }, { $set: { name: p.registeredName, status: "pending", rejectReason: null, createdAt: new Date(), reviewedBy: null, reviewedByTag: null, reviewedAt: null } }, { upsert: true });
+        cardPhotoCool.set(uid, Date.now());
+        res.json({ ok: true });
+    } catch (e) { console.error("❌ رفع صورة البطاقة:", e.message); res.status(500).json({ error: "تعذر رفع الصورة" }); }
+});
+// الصورة المعتمدة (تظهر على البطاقة)
+app.get("/api/card-photo/:uid", ensureAuth, async (req, res) => {
+    try {
+        const uid = String(req.params.uid || "");
+        if (!CARD_UID_RE.test(uid)) return res.status(404).end();
+        const d = await CardImg.findOne({ key: uid + ":approved" });
+        if (!d) return res.status(404).end();
+        res.set("Cache-Control", "private, max-age=86400").type(d.mime || "image/jpeg").send(d.data);
+    } catch (e) { res.status(500).end(); }
+});
+// الصورة قيد المراجعة: لصاحبها أو للإدارة فقط
+app.get("/api/card-photo-pending/:uid", ensureAuth, async (req, res) => {
+    try {
+        const uid = String(req.params.uid || "");
+        if (!CARD_UID_RE.test(uid)) return res.status(404).end();
+        if (uid !== req.user.id) {
+            const st = await getSettings();
+            if (!isSeniorAdmin(req.user.id) && !(st.adminList || []).includes(req.user.id)) return res.status(403).end();
+        }
+        const d = await CardImg.findOne({ key: uid + ":pending" });
+        if (!d) return res.status(404).end();
+        res.set("Cache-Control", "no-store").type(d.mime || "image/jpeg").send(d.data);
+    } catch (e) { res.status(500).end(); }
+});
+app.get("/api/card-photos/pending", ensureAnyAdmin, async (req, res) => {
+    const reqs = await CardPhotoReq.find({ status: "pending" }).sort({ createdAt: 1 }).limit(100).lean();
+    const ps = await Personnel.find({ discord: { $in: reqs.map(r => r.uid) } }, { discord: 1, rank: 1, sector: 1, unit: 1, cardNumber: 1 }).lean();
+    const byId = new Map(ps.map(p => [p.discord, p]));
+    res.json({ list: reqs.map(r => {
+        const p = byId.get(r.uid) || {};
+        return { uid: r.uid, name: r.name, rank: p.rank || "", sectorLabel: (p.sector && CONFIG.SECTORS[p.sector]) || p.unit || "", cardNumber: p.cardNumber || "", createdAt: r.createdAt };
+    }) });
+});
+app.post("/api/card-photos/:uid/approve", ensureAnyAdmin, async (req, res) => {
+    try {
+        const uid = String(req.params.uid || "");
+        if (!CARD_UID_RE.test(uid)) return res.status(404).json({ error: "غير موجود" });
+        const r = await CardPhotoReq.findOne({ uid, status: "pending" });
+        const pend = r ? await CardImg.findOne({ key: uid + ":pending" }) : null;
+        if (!r || !pend) return res.status(404).json({ error: "ما فيه صورة معلّقة لهذا العضو" });
+        await CardImg.findOneAndUpdate({ key: uid + ":approved" }, { $set: { uid, data: pend.data, mime: pend.mime, createdAt: new Date() } }, { upsert: true });
+        await CardImg.deleteOne({ key: uid + ":pending" });
+        await Personnel.updateOne({ discord: uid }, { $set: { cardPhotoV: Date.now() } });
+        r.status = "approved"; r.rejectReason = null; r.reviewedBy = req.user.id; r.reviewedByTag = req.user.username; r.reviewedAt = new Date();
+        await r.save();
+        res.json({ ok: true });
+    } catch (e) { console.error("❌ قبول صورة بطاقة:", e.message); res.status(500).json({ error: "تعذر قبول الصورة" }); }
+});
+app.post("/api/card-photos/:uid/reject", ensureAnyAdmin, async (req, res) => {
+    try {
+        const uid = String(req.params.uid || "");
+        if (!CARD_UID_RE.test(uid)) return res.status(404).json({ error: "غير موجود" });
+        const r = await CardPhotoReq.findOne({ uid, status: "pending" });
+        if (!r) return res.status(404).json({ error: "ما فيه صورة معلّقة لهذا العضو" });
+        await CardImg.deleteOne({ key: uid + ":pending" });
+        r.status = "rejected"; r.rejectReason = String((req.body && req.body.reason) || "").trim().slice(0, 200) || null;
+        r.reviewedBy = req.user.id; r.reviewedByTag = req.user.username; r.reviewedAt = new Date();
+        await r.save();
+        res.json({ ok: true });
+    } catch (e) { res.status(500).json({ error: "تعذر رفض الصورة" }); }
 });
 
 const VIOLATION_COOLDOWN_MS = 5 * 1000;
@@ -3764,7 +3916,15 @@ app.get("/api/senior/personnel", ensureSeniorAdmin, async (req, res) => {
         const ownerDocs = await Personnel.find({ ...base, discord: { $in: owners } }, { "notes.image": 0 });
         list = [...ownerDocs, ...rest];
     }
-    res.json({ list });
+    const cardSt = await getSettings();
+    res.json({ list: list.map(d => {
+        const o = d && d.toObject ? d.toObject() : d;
+        const hc = isHighCommand(o.discord, cardSt);
+        const adm = !!(isSeniorAdmin(o.discord) || (cardSt.adminList || []).includes(o.discord) || hc);
+        o.cardAdmin = adm;
+        o.cardKey = (o.sector && CONFIG.SECTORS[o.sector]) ? o.sector : (hc ? "highCommand" : (adm ? "admin" : "default"));
+        return o;
+    }) });
 });
 
 app.get("/api/senior/personnel/:discord/file", ensureSeniorAdmin, async (req, res) => {
@@ -11644,15 +11804,17 @@ app.get("/", (req, res) => {
     @media (max-width: 560px) { .auth-card { padding: 26px 18px 30px; border-radius: 22px; } .auth-grid { grid-template-columns: 1fr; } .auth-title { font-size: 26px; } }
 
     .mc-wrap { max-width: 340px; margin: 0 auto; }
-    .mcard { position: relative; width: 100%; aspect-ratio: 968 / 609; border-radius: 12px; overflow: hidden; container-type: inline-size; box-shadow: 0 10px 30px rgba(0,0,0,0.45); direction: rtl; background: #fff; cursor: pointer; -webkit-tap-highlight-color: transparent; }
-    .mc-face { position: absolute; inset: 0; background: url('/card-bg.jpg?v=3') center / 100% 100% no-repeat, linear-gradient(135deg, #f4f8f5, #dfe9e3); transition: filter 0.3s, transform 0.3s; }
+    .mcard { position: relative; width: 100%; aspect-ratio: 736 / 418; border-radius: 12px; overflow: hidden; container-type: inline-size; box-shadow: 0 10px 30px rgba(0,0,0,0.45); direction: rtl; background: #fff; cursor: pointer; -webkit-tap-highlight-color: transparent; }
+    .mc-face { position: absolute; inset: 0; background: linear-gradient(135deg, #f4f8f5, #dfe9e3); transition: filter 0.3s, transform 0.3s; }
     .mcard.locked .mc-face { filter: blur(15px); transform: scale(1.08); }
     .mc-t { position: absolute; color: #0f172a; font-weight: 800; font-size: 3.5cqw; line-height: 1.25; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-align: right; direction: rtl; text-shadow: 0 0 3px rgba(255,255,255,0.95), 0 0 6px rgba(255,255,255,0.8); transform: translateY(-50%); }
-    .mc-t.name { left: 51.5%; right: 12.2%; top: 25.04%; }
-    .mc-t.rank { left: 51.5%; right: 12.2%; top: 38.59%; }
-    .mc-t.unit { left: 51.5%; right: 12.2%; top: 50.41%; }
-    .mc-t.sector { left: 51.5%; right: 12.2%; top: 62.89%; }
-    .mc-t.num { left: 7.64%; width: 17.25%; top: 95.5%; text-align: center; direction: ltr; font-size: 1.7cqw; letter-spacing: 0.12em; text-shadow: none; }
+    .mc-t { padding-right: 0.7cqw; box-sizing: border-box; }
+    .mc-t.num { direction: ltr; text-align: right; letter-spacing: 0.14em; text-shadow: 0 0 3px rgba(255,255,255,0.95); }
+    .mc-photo { position: absolute; object-fit: cover; border-radius: 0.8cqw; background: #e5e7eb; }
+    .mc-bc { position: absolute; display: flex; align-items: center; justify-content: flex-start; cursor: pointer; z-index: 1; -webkit-tap-highlight-color: transparent; text-decoration: none; }
+    .mc-bc img { height: 100%; aspect-ratio: 1; background: #fff; padding: 0.3cqw; border-radius: 0.6cqw; box-shadow: 0 0 0 0.25cqw rgba(15,23,42,0.35); }
+    .mc-adm { text-align: center; margin-top: 8px; font-weight: 800; font-size: 14px; color: #ef4444; }
+    .mcard.dbg .mc-t, .mcard.dbg .mc-photo, .mcard.dbg .mc-bc { outline: 1px dashed #d946ef; }
     .mc-cover { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2cqw; background: rgba(15,30,60,0.28); cursor: pointer; z-index: 2; }
     .mc-cover svg { width: 15cqw; height: 15cqw; filter: drop-shadow(0 2px 8px rgba(0,0,0,0.7)); }
     .mc-cover span { color: #fff; font-weight: 800; font-size: 4.2cqw; text-shadow: 0 2px 8px rgba(0,0,0,0.75); }
@@ -11676,9 +11838,9 @@ app.get("/", (req, res) => {
     #mc-page .mc-wrap { margin-top: 6px; }
     #mc-full { display: none; position: fixed; inset: 0; z-index: 5200; background: rgba(0,0,0,0.95); align-items: center; justify-content: center; overflow: hidden; }
     #mc-full.open { display: flex; }
-    #mc-full .mc-fs { width: min(96vw, calc(92vh * 968 / 609)); flex-shrink: 0; cursor: pointer; }
+    #mc-full .mc-fs { width: min(96vw, calc(92vh * 736 / 418)); flex-shrink: 0; cursor: pointer; }
     #mc-full .mc-fs .mcard { cursor: pointer; border-radius: 14px; }
-    @media (orientation: portrait) { #mc-full .mc-fs { width: min(92vh, calc(96vw * 968 / 609)); transform: rotate(90deg); } }
+    @media (orientation: portrait) { #mc-full .mc-fs { width: min(92vh, calc(96vw * 736 / 418)); transform: rotate(90deg); } }
     #mc-full .mc-x { position: absolute; top: env(safe-area-inset-top,12px); left: 12px; z-index: 2; background: rgba(255,255,255,0.14); color: #fff; border: none; border-radius: 50%; width: 40px; height: 40px; font-size: 18px; cursor: pointer; margin-top: 10px; }
     .acc-card .acc-title { font-size: 17px; font-weight: 800; color: var(--gold-soft); margin-bottom: 8px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
     .acc-row { display: flex; justify-content: space-between; gap: 12px; padding: 5px 0; border-bottom: 1px dashed rgba(255,255,255,0.06); font-size: 13px; }
@@ -16374,6 +16536,7 @@ function renderAdmin(startTab) {
             <div class="tab" onclick="adminTab('reviewed', this)">✅ المخالفات المقبولة</div>
             <div class="tab" onclick="adminTab('sectors', this)">قادة القطاعات</div>
             <div class="tab" onclick="adminTab('regs', this)">📥 طلبات التسجيل</div>
+            <div class="tab" id="tab-cphoto" onclick="adminTab('cphoto', this)">🖼️ صور البطاقات</div>
             <div class="tab" onclick="adminTab('accounts', this)">✅ الحسابات المقبولة</div>
             <div class="tab" onclick="adminTab('personnel', this)">ملفات العسكريين</div>
             <div class="tab" onclick="adminTab('sfile', this)">📇 عرض ملف عسكري</div>
@@ -16393,7 +16556,7 @@ function renderAdmin(startTab) {
             \${/* ملاحظة: هنا التردد — تم حذف التاب فقط والكود باقي. لإرجاعه حط مكان '' هذا: '<div class="tab" onclick="adminTab(\'freq\', this)">📻 الترددات</div>' */ ''}
             <div class="tab" onclick="adminTab('settings', this)">الإعدادات</div>
             <div class="tab" onclick="renderNewReport()">🧪 تسجيل تقرير جديد مكافحة</div>
-        </div>\` : (ME.isAdmin ? \`<div class="tabs"><div class="tab active" onclick="adminTab('regs', this)">📥 طلبات التسجيل</div><div class="tab" id="tab-support" onclick="adminTab('support', this)">🎧 خدمة العملاء</div></div>\` : '');
+        </div>\` : (ME.isAdmin ? \`<div class="tabs"><div class="tab active" onclick="adminTab('regs', this)">📥 طلبات التسجيل</div><div class="tab" id="tab-cphoto" onclick="adminTab('cphoto', this)">🖼️ صور البطاقات</div><div class="tab" id="tab-support" onclick="adminTab('support', this)">🎧 خدمة العملاء</div></div>\` : '');
     document.getElementById('app').innerHTML = \`
         <div class="card row"><h2>\${ME.isSeniorAdmin ? 'لوحة تحكم كبار المسؤولين' : 'لوحة الإدارة'}</h2><button class="btn gray sm" onclick="renderDashboard()">رجوع للوحتي</button></div>
         \${tabsHtml}
@@ -16410,6 +16573,7 @@ function adminTab(name, el) {
     if (name === 'reviewed') loadReviewedViolations();
     if (name === 'sectors') loadSectors();
     if (name === 'regs') loadRegs();
+    if (name === 'cphoto') loadCardPhotoTab();
     if (name === 'accounts') loadAccounts();
     if (name === 'personnel') loadPersonnel();
     if (name === 'vehicles') loadVehicles();
@@ -19263,7 +19427,12 @@ function remainText(nextRank, remaining) {
 }
 function cardFields(p) {
     const notes = (p.notes || []).map(function (n) { return n.text; }).filter(Boolean);
+    const key = cardKeyOf(p);
     return {
+        key: key,
+        admin: !!(p.cardAdmin && SECTOR_LABELS[key]),
+        avatar: p.cardPhotoV ? '/api/card-photo/' + (p.discord || p.discordId) + '?v=' + p.cardPhotoV : null,
+        division: (p.sector && SECTOR_LABELS[p.sector]) || p.unit || '-',
         name: p.registeredName || p.discordTag || '-',
         rank: p.rank || '-',
         unit: p.unit || '-',
@@ -19279,13 +19448,48 @@ function cardFields(p) {
 const MC_DATA = {};
 const MC_OPT = {};
 const MC_ROWS = [['name', 'الاسم'], ['rank', 'الرتبة'], ['unit', 'اليونت'], ['num', 'رقم البطاقة'], ['points', 'النقاط'], ['sector', 'القطاع'], ['notes', 'الملاحظات'], ['excused', 'الغياب بعذر'], ['removed', 'الغياب المُزال']];
+// إحداثيات كل بطاقة (نسب مئوية من حجم البطاقة):
+// rows = مركز صفوف [الاسم، الرتبة، القطاع، رقم البطاقة] عمودياً | gx,gw = بداية وعرض خانات الكتابة
+// photo = [يسار، أعلى، عرض، ارتفاع] لمربع الصورة | bc = [يسار، أعلى، عرض، ارتفاع] لمنطقة الباركود
+const MC_LAYOUT = {
+    mp:           { rows: [36.5, 46.2, 55.9, 66.3], gx: 26.1, gw: 23.6, photo: [78.3, 27.3, 18.1, 36.8], bc: [23.4, 76.1, 52.0, 12.9] },
+    patrol:       { rows: [34.8, 44.5, 54.6, 64.4], gx: 26.1, gw: 23.8, photo: [78.8, 26.2, 19.0, 35.5], bc: [23.4, 73.8, 53.0, 13.0] },
+    antiDrugs:    { rows: [35.6, 45.4, 55.4, 65.6], gx: 24.7, gw: 24.0, photo: [77.5, 26.5, 18.1, 36.6], bc: [20.5, 75.4, 53.4, 12.5] },
+    roadSecurity: { rows: [35.0, 45.2, 55.4, 65.4], gx: 24.2, gw: 24.3, photo: [77.6, 25.6, 18.6, 37.3], bc: [20.5, 74.4, 55.0, 13.4] },
+    cyber:        { rows: [36.5, 46.2, 55.9, 66.3], gx: 26.1, gw: 23.6, photo: [78.3, 27.3, 18.1, 36.8], bc: [23.4, 76.1, 52.0, 12.9] },
+    admin:        { rows: [36.5, 46.2, 55.9, 66.3], gx: 26.1, gw: 23.6, photo: [78.3, 27.3, 18.1, 36.8], bc: [23.4, 76.1, 52.0, 12.9] },
+    highCommand:  { rows: [36.5, 46.2, 55.9, 66.3], gx: 26.1, gw: 23.6, photo: [78.3, 27.3, 18.1, 36.8], bc: [23.4, 76.1, 52.0, 12.9] },
+    default:      { rows: [36.5, 46.2, 55.9, 66.3], gx: 26.1, gw: 23.6, photo: [78.3, 27.3, 18.1, 36.8], bc: [23.4, 76.1, 52.0, 12.9] }
+};
+const MC_BG_V = '1';
+function cardKeyOf(p) {
+    if (p && p.cardKey && MC_LAYOUT[p.cardKey]) return p.cardKey;
+    return (p && p.sector && MC_LAYOUT[p.sector]) ? p.sector : 'default';
+}
+function mcFs(txt, isNum) {
+    const n = String(txt == null ? '' : txt).length;
+    if (isNum) return '2.7cqw';
+    return (n <= 10 ? 2.9 : n <= 14 ? 2.5 : n <= 18 ? 2.1 : n <= 24 ? 1.7 : 1.4) + 'cqw';
+}
+function mcFit(node) { node.style.fontSize = mcFs(node.textContent, node.classList.contains('num')); }
+function mcAdminTag(f) { return f.admin ? '<div class="mc-adm">🔴 إداري</div>' : ''; }
+function mcDebug(on) { document.querySelectorAll('.mcard').forEach(function (c) { c.classList.toggle('dbg', on !== false); }); }
 function mcFace(f) {
-    return '<div class="mc-face">' +
-        '<div class="mc-t name" data-k="name">' + cardEsc(f.name) + '</div>' +
-        '<div class="mc-t rank" data-k="rank">' + cardEsc(f.rank) + '</div>' +
-        '<div class="mc-t unit" data-k="unit">' + cardEsc(f.unit) + '</div>' +
-        '<div class="mc-t sector" data-k="sector">' + cardEsc(f.sector) + '</div>' +
-        '<div class="mc-t num" data-k="num">' + cardEsc(f.num) + '</div>' +
+    const L = MC_LAYOUT[f.key] || MC_LAYOUT['default'];
+    const box = function (a) { return 'left:' + a[0] + '%;top:' + a[1] + '%;width:' + a[2] + '%;height:' + a[3] + '%;'; };
+    const t = function (k, y, txt, cls) {
+        return '<div class="mc-t ' + cls + '" data-k="' + k + '" style="left:' + L.gx + '%;width:' + L.gw + '%;top:' + y + '%;font-size:' + mcFs(txt, k === 'num') + ';">' + cardEsc(txt) + '</div>';
+    };
+    const photo = f.avatar ? '<img class="mc-photo" src="' + cardEsc(f.avatar) + '" alt="" onerror="this.remove()" style="' + box(L.photo) + '">' : '';
+    const bc = /^[0-9]{8}$/.test(String(f.num))
+        ? '<a class="mc-bc" href="/verify-card/' + f.num + '" target="_blank" rel="noopener" onclick="event.stopPropagation()" style="' + box(L.bc) + '"><img src="/card-qr/' + f.num + '" alt=""></a>'
+        : '';
+    return '<div class="mc-face" style="background: url(/card-bg/' + f.key + '?v=' + MC_BG_V + ') center / 100% 100% no-repeat, linear-gradient(135deg, #f4f8f5, #dfe9e3);">' +
+        t('name', L.rows[0], f.name, 'name') +
+        t('rank', L.rows[1], f.rank, 'rank') +
+        t('division', L.rows[2], f.division, 'sector') +
+        t('num', L.rows[3], f.num, 'num') +
+        photo + bc +
     '</div>';
 }
 function cardBlock(p, o) {
@@ -19301,9 +19505,83 @@ function cardBlock(p, o) {
         '<div class="mcard locked" onclick="mcTap(this)">' +
             mcFace(f) +
             '<div class="mc-cover">' + eye + '<span>عرض البطاقة</span></div>' +
-        '</div>' + remain +
+        '</div>' + mcAdminTag(f) + remain +
         '<div class="mc-hint">اضغط على البطاقة لعرضها كاملة ⤢</div>' +
     '</div>';
+}
+// ===== صورة البطاقة: العضو يرفع، والإدارة تراجع =====
+function cpSectionHtml() {
+    const st = ME.cardPhotoStatus;
+    let h = '<div class="mc-row" id="cp-box"><div class="mc-row-top"><span>📷 صورة البطاقة</span></div>';
+    if (st === 'pending') h += '<b style="color:#fbbf24;">⏳ صورتك قيد المراجعة من الإدارة</b><img src="/api/card-photo-pending/' + ME.discordId + '?t=' + Date.now() + '" alt="" style="width:72px;height:84px;object-fit:cover;border-radius:8px;margin-top:8px;display:block;">';
+    else if (st === 'rejected') h += '<b style="color:#f87171;">❌ انرفضت صورتك' + (ME.cardPhotoReason ? ': ' + cardEsc(ME.cardPhotoReason) : '') + '</b>';
+    else if (ME.cardPhotoV) h += '<b style="color:#4ade80;">✅ صورتك معتمدة وتظهر على البطاقة</b>';
+    else h += '<b style="color:var(--muted);">ما حطيت صورة للبطاقة</b>';
+    h += '<button class="btn sm" style="margin-top:8px;" onclick="cpPick()">' + ((ME.cardPhotoV || st) ? 'تغيير الصورة' : 'إضافة صورة') + '</button>' +
+        '<input type="file" id="cp-file" accept="image/*" style="display:none" onchange="cpUpload(this)"></div>';
+    return h;
+}
+function cpPick() { const i = document.getElementById('cp-file'); if (i) i.click(); }
+function cpCompress(file) {
+    return new Promise(function (resolve, reject) {
+        const img = new Image(), url = URL.createObjectURL(file);
+        img.onload = function () {
+            const W = 480, H = 555, cv = document.createElement('canvas');
+            cv.width = W; cv.height = H;
+            const s = Math.max(W / img.width, H / img.height), w = img.width * s, h = img.height * s;
+            const ctx = cv.getContext('2d');
+            ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, W, H);
+            ctx.drawImage(img, (W - w) / 2, (H - h) / 2, w, h);
+            URL.revokeObjectURL(url);
+            resolve(cv.toDataURL('image/jpeg', 0.85));
+        };
+        img.onerror = function () { URL.revokeObjectURL(url); reject(new Error('الملف مو صورة صالحة')); };
+        img.src = url;
+    });
+}
+async function cpUpload(inp) {
+    const f = inp.files && inp.files[0];
+    if (!f) return;
+    try {
+        if (f.type.indexOf('image/') !== 0) { toast('اختر صورة فقط'); return; }
+        const data = await cpCompress(f);
+        await api('/api/card-photo', { method: 'POST', body: JSON.stringify({ photo: data }) });
+        ME.cardPhotoStatus = 'pending'; ME.cardPhotoReason = null;
+        toast('انرسلت الصورة للمراجعة ✅');
+        const pg = document.getElementById('mc-page');
+        if (pg && pg.classList.contains('open')) { const id = pg.getAttribute('data-src'); if (id) openMcPage(id); }
+    } catch (e) { toast(e.message || 'تعذر رفع الصورة'); }
+    inp.value = '';
+}
+async function loadCardPhotoTab() {
+    const box = document.getElementById('admin-content');
+    if (!box) return;
+    box.innerHTML = '<div class="card center" style="color:var(--muted);">جارِ التحميل...</div>';
+    let d;
+    try { d = await api('/api/card-photos/pending', { noLock: true }); }
+    catch (e) { if (currentAdminTab === 'cphoto') box.innerHTML = '<div class="card" style="color:#f87171;">' + cardEsc(e.message) + '</div>'; return; }
+    if (currentAdminTab !== 'cphoto') return;
+    const list = d.list || [];
+    if (!list.length) { box.innerHTML = '<div class="card center" style="color:var(--muted);">ما فيه صور بطاقات بانتظار المراجعة ✅</div>'; return; }
+    box.innerHTML = '<div class="card"><h2>🖼️ صور البطاقات بانتظار المراجعة (' + list.length + ')</h2></div>' + list.map(function (r) {
+        return '<div class="card" style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;">' +
+            '<img src="/api/card-photo-pending/' + encodeURIComponent(r.uid) + '?t=' + encodeURIComponent(r.createdAt) + '" alt="" onclick="window.open(this.src)" style="width:96px;height:111px;object-fit:cover;border-radius:10px;cursor:pointer;">' +
+            '<div style="flex:1;min-width:140px;"><b>' + cardEsc(r.name) + '</b><div style="font-size:12px;color:var(--muted);margin-top:4px;">' + cardEsc([r.rank, r.sectorLabel, r.cardNumber].filter(Boolean).join(' • ')) + '</div></div>' +
+            '<div class="row" style="gap:6px;"><button class="btn sm" data-u="' + cardEsc(r.uid) + '" onclick="cpReview(this.dataset.u, true)">✅ قبول</button>' +
+            '<button class="btn danger sm" data-u="' + cardEsc(r.uid) + '" onclick="cpReview(this.dataset.u, false)">❌ رفض</button></div></div>';
+    }).join('');
+}
+async function cpReview(uid, ok) {
+    try {
+        if (ok) await api('/api/card-photos/' + encodeURIComponent(uid) + '/approve', { method: 'POST', body: JSON.stringify({}) });
+        else {
+            const reason = await promptModal('سبب رفض الصورة (اختياري):', '');
+            if (reason === null || reason === undefined || reason === false) return;
+            await api('/api/card-photos/' + encodeURIComponent(uid) + '/reject', { method: 'POST', body: JSON.stringify({ reason: String(reason) }) });
+        }
+        toast(ok ? 'تم قبول الصورة ✅' : 'تم رفض الصورة');
+        loadCardPhotoTab();
+    } catch (e) { toast(e.message || 'صار خطأ'); }
 }
 function mcTap(el) {
     const w = el.closest('.mc-wrap');
@@ -19324,9 +19602,10 @@ function mcInfoHtml(id) {
         if ((r[0] === 'excused' || r[0] === 'removed') && f[r[0]] === null) return;
         info += '<div class="mc-row"><div class="mc-row-top"><span>' + r[1] + '</span><button class="mc-copy" onclick="mcCopy(this)">📋 نسخ</button></div><b data-k="' + r[0] + '">' + cardEsc(f[r[0]]) + '</b></div>';
     });
+    if (id === 'me-card') info += cpSectionHtml();
     const remain = o.hasProgress ? '<div class="mc-remain">' + remainText(o.nextRank, o.remaining) + '</div>' : '';
     return '<div class="mc-wrap unlocked" data-mc="' + id + '">' +
-        '<div class="mcard" onclick="mcTap(this)">' + mcFace(f) + '</div>' +
+        '<div class="mcard" onclick="mcTap(this)">' + mcFace(f) + '</div>' + mcAdminTag(f) +
         '<div class="mc-hint">اضغط على البطاقة لعرضها كاملة ⤢</div>' + remain +
         '<div class="mc-info open">' + info +
             '<div class="row" style="gap:8px;margin-top:4px;">' +
@@ -19413,6 +19692,7 @@ function cardUpdate(rootId, p) {
         root.querySelectorAll('[data-k]').forEach(function (n) {
             const k = n.getAttribute('data-k');
             if (f[k] !== undefined) n.textContent = f[k];
+            if (n.classList.contains('mc-t')) mcFit(n);
         });
     });
 }
