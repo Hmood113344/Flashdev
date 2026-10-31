@@ -3452,7 +3452,7 @@ const CardPhotoReq = mongoose.model("CardPhotoReq", new mongoose.Schema({
     reviewedBy: { type: String, default: null }, reviewedByTag: { type: String, default: null }, reviewedAt: { type: Date, default: null },
 }));
 const cardPhotoCool = new Map();
-const CARD_UID_RE = /^[0-9]{5,25}$/;
+const CARD_UID_RE = /^[A-Za-z0-9_-]{5,40}$/;
 
 app.post("/api/card-photo", ensureAuth, async (req, res) => {
     try {
