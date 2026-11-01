@@ -6718,8 +6718,39 @@ app.get("/api/bank/sso", ensureAuth, async (req, res) => {
         const p = await Personnel.findOne({ discord: req.user.id }, { registeredName: 1, rank: 1, unit: 1 }).lean();
         if (!p || !p.registeredName) return res.status(400).json({ error: "أكمل تسجيل بياناتك أولاً" });
         const token = bankSignToken({ uid: req.user.id, name: p.registeredName, rank: p.rank || "", unit: p.unit || "", senior: isSeniorAdmin(req.user.id), exp: Date.now() + 60 * 1000, n: crypto.randomBytes(9).toString("hex") });
-        res.json({ ok: true, url: BANK_URL + "/sso?t=" + encodeURIComponent(token) });
+        res.json({ ok: true, url: "/bank/sso?t=" + encodeURIComponent(token) });
     } catch (e) { console.error("❌ bank sso:", e.message); res.status(500).json({ error: "تعذر فتح البنك" }); }
+});
+// ---- البنك يظهر داخل فلاش نفسه على المسار /bank (نفس الدومين = يبقى داخل تطبيق الويب بدون شريط متصفح) ----
+// فلاش يمرّر الطلبات لخدمة البنك من السيرفر، ولا يمرّر للبنك غير كوكي البنك (كوكي فلاش ما يطلع له أبداً).
+function bankProxyToken() { return crypto.createHmac("sha256", bankKey()).update("flash-proxy-v1").digest("hex"); }
+app.all(/^\/bank(?:\/(.*))?$/, async (req, res) => {
+    try {
+        const isApi = /^\/bank\/api\//.test(req.path);
+        if (!req.isAuthenticated || !req.isAuthenticated()) return isApi ? res.status(401).json({ success: false, msg: "سجّل دخولك في فلاش أولاً" }) : res.redirect("/");
+        if (!bankKey()) return res.status(503).send("البنك غير مربوط بعد (INTERNAL_API_KEY ناقص)");
+        const sub = "/" + String(req.params[0] || "");
+        if (/^\/(api\/flash|auth)(\/|$)/.test(sub)) return res.status(403).json({ success: false, msg: "غير مصرح" });
+        const qi = req.originalUrl.indexOf("?");
+        const qs = qi >= 0 ? req.originalUrl.slice(qi) : "";
+        const headers = { "x-flash-proxy": bankProxyToken(), "x-forwarded-prefix": "/bank", "accept": req.get("accept") || "*/*", "accept-language": req.get("accept-language") || "ar", "user-agent": req.get("user-agent") || "flash" };
+        const m = /(?:^|;\s*)bank_session=([^;]*)/.exec(req.headers.cookie || "");
+        if (m) headers.cookie = "bank_session=" + m[1];
+        let body;
+        if (req.method !== "GET" && req.method !== "HEAD" && /json/i.test(req.get("content-type") || "")) { body = JSON.stringify(req.body || {}); headers["content-type"] = "application/json"; }
+        const r = await fetch(BANK_URL + sub + qs, { method: req.method, headers, body, redirect: "manual", signal: AbortSignal.timeout(25000) });
+        res.status(r.status);
+        const ct = r.headers.get("content-type"); if (ct) res.set("Content-Type", ct);
+        res.set("Cache-Control", "no-store");
+        const loc = r.headers.get("location");
+        if (loc) res.set("Location", loc.indexOf(BANK_URL) === 0 ? "/bank" + loc.slice(BANK_URL.length) : (loc.charAt(0) === "/" && loc.indexOf("/bank") !== 0 ? "/bank" + loc : loc));
+        const sc = typeof r.headers.getSetCookie === "function" ? r.headers.getSetCookie() : (r.headers.get("set-cookie") ? [r.headers.get("set-cookie")] : []);
+        if (sc.length) res.append("Set-Cookie", sc.map(c => c.replace(/;\s*Path=[^;]*/i, "").replace(/;\s*Domain=[^;]*/i, "") + "; Path=/bank"));
+        res.send(Buffer.from(await r.arrayBuffer()));
+    } catch (e) {
+        console.error("❌ bank proxy:", e.message);
+        if (!res.headersSent) res.status(502).send("تعذر الاتصال ببنك فلاش حالياً، جرّب بعد شوي");
+    }
 });
 // البنك يسأل عن الرتب (جدول الرواتب) ورتبة كل عسكري — بمفتاح سرّي بين الموقعين
 app.get("/api/bank/ranks", ensureBankKey, async (req, res) => {
