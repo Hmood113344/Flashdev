@@ -3358,7 +3358,7 @@ function certPageHtml(c, assets, forPrint, baseUrl) {
         '.meta{margin-top:12px;border-top:1px dashed #c9a227;padding-top:8px;font-size:12px;color:#4b5563;display:flex;justify-content:space-between;flex-wrap:wrap;gap:6px}' +
         '.wm{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:150px;font-weight:800;color:rgba(220,38,38,.18);transform:rotate(-25deg);pointer-events:none}' +
         '@media print{html,body{background:#fff}.bar{display:none}.page{margin:0;box-shadow:none}}@media(max-width:820px){.page{width:100%;min-height:0;padding:6px;margin:0}.frame{padding:14px}.title{font-size:28px}table{font-size:14px}.sigs{flex-wrap:wrap}.sig,.qr{width:48%}}</style></head><body>' +
-        (forPrint === false ? "" : '<div class="bar"><button class="back" onclick="if(history.length>1){history.back()}else{location.href=\'/?go=certs\'}">↩️ رجوع</button><span>📜 ' + certEsc(kindLbl) + '</span><button onclick="window.print()">🖨️ طباعة / حفظ PDF</button></div>') +
+        (forPrint === false ? "" : '<div class="bar"><button class="back" onclick="var h=location.href;if(history.length>1){history.back();setTimeout(function(){if(location.href===h){location.href=\'/?go=certs\'}},450)}else{location.href=\'/?go=certs\'}">↩️ رجوع</button><span>📜 ' + certEsc(kindLbl) + '</span><button onclick="window.print()">🖨️ طباعة / حفظ PDF</button></div>') +
         '<div class="page"><div class="frame">' + (revoked ? '<div class="wm">ملغاة</div>' : '') +
         '<div class="hd"><div class="org">' + certEsc(CONFIG.SITE_NAME) + '</div><div class="sub">الإدارة العامة للسيرفر — وثيقة رسمية</div></div>' +
         '<div class="title">' + certEsc(kindLbl) + '</div><div class="no">رقم الوثيقة: <b dir="ltr">' + certEsc(c.code) + '</b></div>' + (revoked ? '<div style="text-align:center;margin:10px 0 0;"><span style="display:inline-block;background:#fee2e2;color:#b91c1c;border:1.5px solid #b91c1c;border-radius:10px;padding:5px 18px;font-weight:800;font-size:16px;">⚠️ هذي الوثيقة ملغاة ولا يُعتدّ بها</span></div>' : '') + body +
@@ -3414,7 +3414,7 @@ app.get("/verify/:code", async (req, res) => {
 
 // ===================== 🪪 التحقق من البطاقة العسكرية (يفتحها أي أحد يمسح باركود البطاقة أو يضغط عليه) =====================
 // زر الرجوع بصفحات التحقق (باركود البطاقة والشهادة): يرجع للصفحة اللي قبل، وإذا انفتحت بتبويب جديد يودّي للموقع
-const VERIFY_BACK_BTN = '<div style="padding:14px 18px;text-align:center;"><a href="/" onclick="if(history.length>1){history.back();return false;}" style="display:inline-block;background:#0b1f4a;color:#fff;text-decoration:none;font-weight:800;padding:10px 30px;border-radius:10px;font-size:15px;">🔙 رجوع</a></div>';
+const VERIFY_BACK_BTN = '<div style="padding:14px 18px;text-align:center;"><a href="/" onclick="var h=location.href;if(history.length>1){history.back();setTimeout(function(){if(location.href===h){location.href=\'/\'}},450);return false;}" style="display:inline-block;background:#0b1f4a;color:#fff;text-decoration:none;font-weight:800;padding:10px 30px;border-radius:10px;font-size:15px;">🔙 رجوع</a></div>';
 const CARD_NUM_RE = /^[0-9]{8}$/;
 app.get("/card-qr/:num", (req, res) => {
     const n = String(req.params.num || "");
