@@ -2494,8 +2494,8 @@ async function ensureJuniorInMySector(req, res, discordId) {
 const nodePath = require("path");
 const fsCard = require("fs");
 // خلفيات البطاقات: لكل قطاع ملف صورة بجانب app.js باسم card-<المفتاح>.jpg
-// المفاتيح: patrol / roadSecurity / antiDrugs / mp / cyber / admin / highCommand / default
-const CARD_KEYS = ["patrol", "roadSecurity", "antiDrugs", "mp", "cyber", "admin", "highCommand", "default"];
+// المفاتيح: patrol / roadSecurity / antiDrugs / mp / cyber / senior / highCommand / default
+const CARD_KEYS = ["patrol", "roadSecurity", "antiDrugs", "mp", "cyber", "senior", "highCommand", "default"];
 function cardBgFile(key) {
     const names = [];
     for (const k of [key, key.toLowerCase()]) for (const ext of ["jpg", "jpeg", "png", "webp"]) names.push("card-" + k + "." + ext);
@@ -2785,7 +2785,7 @@ app.get("/api/me", ensureAuth, async (req, res) => {
             const s = (meAcc && meAcc.sector) || p.sector || null;
             if (s && CONFIG.SECTORS[s]) return s;
             if (isHighCommand(req.user.id, settings)) return "highCommand";
-            return isAdmin ? "admin" : "default";
+            return senior ? "senior" : "default";
         })(),
         sector: (meAcc && meAcc.sector) || p.sector || null,
         unit: p.unit,
@@ -3197,9 +3197,14 @@ async function ensureCertIssuer(req, res, next) {
     req.certRole = role; req.settings = settings;
     next();
 }
+function certIssuerLabel(c) {
+    const n = String(c.issuedByName || "").trim(), r = String(c.issuedByRole || "").trim();
+    if (n && n !== "كبار المسؤولين") return r ? n + " — " + r : n;
+    return r || n || "-";
+}
 function certPublic(c) {
     return { code: c.code, kind: c.kind, kindLabel: CERT_LABEL[c.kind] || c.kind, targetDiscord: c.targetDiscord, name: (c.data || {}).name, rank: (c.data || {}).rank,
-        issuedByName: c.issuedByName, issuedByRole: c.issuedByRole, status: c.status, createdAt: c.createdAt, revokedByName: c.revokedByName, revokedAt: c.revokedAt };
+        issuedByName: c.issuedByName, issuedByRole: c.issuedByRole, issuedByLabel: certIssuerLabel(c), status: c.status, createdAt: c.createdAt, revokedByName: c.revokedByName, revokedAt: c.revokedAt };
 }
 async function certListFor(discord) {
     const list = await Certificate.find({ targetDiscord: discord }).sort({ createdAt: -1 }).limit(100).lean();
@@ -3251,7 +3256,7 @@ app.post("/api/certs/issue", ensureCertIssuer, async (req, res) => {
     const settings = req.settings;
     const data = await certBuildData(p, settings, note);
     const me = await Personnel.findOne({ discord: req.user.id }, { registeredName: 1 }).lean();
-    const issuedByName = isSeniorAdmin(req.user.id) ? "كبار المسؤولين" : ((me && me.registeredName) || req.user.username);
+    const issuedByName = (me && me.registeredName) || req.user.username;
     let c = null;
     for (let i = 0; i < 5 && !c; i++) {
         try { c = await Certificate.create({ code: genCertCode(), kind, targetDiscord: discord, data, issuedBy: req.user.id, issuedByName, issuedByRole: req.certRole }); }
@@ -3269,7 +3274,7 @@ app.post("/api/certs/:code/revoke", ensureCertIssuer, async (req, res) => {
     if (c.status === "revoked") return res.json({ ok: true });
     const me = await Personnel.findOne({ discord: req.user.id }, { registeredName: 1 }).lean();
     c.status = "revoked"; c.revokedBy = req.user.id; c.revokedAt = new Date();
-    c.revokedByName = isSeniorAdmin(req.user.id) ? "كبار المسؤولين" : ((me && me.registeredName) || req.user.username);
+    c.revokedByName = (me && me.registeredName) || req.user.username;
     await c.save();
     await logEvent({ action: "سحب شهادة", discordId: c.targetDiscord, actorId: req.user.id, actorTag: req.user.username, details: (CERT_LABEL[c.kind] || "") + " (" + c.code + ") — " + ((c.data || {}).name || "") });
     res.json({ ok: true });
@@ -3361,7 +3366,7 @@ function certPageHtml(c, assets, forPrint, baseUrl) {
         '<div class="sig"><div class="box"><div class="st">' + (assets.vpStamp ? certAssetImg(assets.vpStamp, 100) : certStampSvg(CERT_DEFAULTS.vpTitle, "#b91c1c")) + '</div>' + (assets.vpSig ? certAssetImg(assets.vpSig, 70) : certSigSvg(2)) + '</div><div class="nm">' + certEsc(vpName) + '</div><div class="tt">' + certEsc(CERT_DEFAULTS.vpTitle) + '</div></div>' +
         '<div class="qr"><a href="' + certEsc(url) + '" target="_blank" rel="noopener" style="display:block;color:inherit;text-decoration:none;">' + qr + '<div class="cap">امسح الرمز أو اضغط عليه للتحقق من صحة الوثيقة</div></a></div>' +
         '<div class="sig"><div class="box"><div class="st">' + (assets.presStamp ? certAssetImg(assets.presStamp, 100) : certStampSvg(CERT_DEFAULTS.presTitle, "#1d3a8a")) + '</div>' + (assets.presSig ? certAssetImg(assets.presSig, 70) : certSigSvg(1)) + '</div><div class="nm">' + certEsc(presName) + '</div><div class="tt">' + certEsc(CERT_DEFAULTS.presTitle) + '</div></div>' +
-        '</div><div class="meta"><span>تاريخ الإصدار: ' + certDate(c.createdAt) + '</span><span>أصدرها: ' + certEsc(c.issuedByRole || "") + '</span><span dir="ltr">' + certEsc(url) + '</span></div>' +
+        '</div><div class="meta"><span>تاريخ الإصدار: ' + certDate(c.createdAt) + '</span><span>أصدرها: ' + certEsc(certIssuerLabel(c)) + '</span><span dir="ltr">' + certEsc(url) + '</span></div>' +
         '</div></div></body></html>';
 }
 // رابط الموقع الحقيقي من الطلب نفسه (عشان الباركود دايم يفتح موقع فلاش اللي انفتحت منه الشهادة)
@@ -3399,7 +3404,7 @@ app.get("/verify/:code", async (req, res) => {
     else { status = "سارية وصحيحة"; color = "#15803d"; icon = "✅"; msg = "هذي الوثيقة صادرة رسمياً من " + CONFIG.SITE_NAME + " ومسجّلة في ملف العسكري."; }
     const row = (k, v) => '<div class="r"><span>' + k + '</span><b>' + certEsc(v) + '</b></div>';
     const details = c ? row("نوع الوثيقة", CERT_LABEL[c.kind] || "-") + row("اسم العسكري", d.name || "-") + row("الرتبة وقت الإصدار", d.rank || "-") + row("اليونت", d.unit || "-") +
-        row("تاريخ الإصدار", certDate(c.createdAt)) + row("جهة الإصدار", c.issuedByRole || "-") + row("رقم الوثيقة", c.code) + (c.status === "revoked" ? row("تاريخ السحب", certDate(c.revokedAt)) : "") : "";
+        row("تاريخ الإصدار", certDate(c.createdAt)) + row("أصدرها", certIssuerLabel(c)) + row("رقم الوثيقة", c.code) + (c.status === "revoked" ? row("تاريخ السحب", certDate(c.revokedAt)) : "") : "";
     res.set("Cache-Control", "no-store").type("html").send('<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex"><title>التحقق من الوثيقة</title>' +
         '<link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;700;800&display=swap" rel="stylesheet"><style>*{box-sizing:border-box}body{margin:0;background:#0b1f4a;font-family:Tajawal,Cairo,"Segoe UI",Tahoma,Arial,sans-serif;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:16px}' +
         '.c{background:#fffdf7;border-radius:16px;max-width:460px;width:100%;overflow:hidden;box-shadow:0 10px 40px rgba(0,0,0,.4)}.h{background:' + color + ';color:#fff;text-align:center;padding:22px 14px}.h .i{font-size:46px}.h .s{font-size:24px;font-weight:800;margin-top:4px}' +
@@ -3996,7 +4001,7 @@ app.get("/api/senior/personnel", ensureSeniorAdmin, async (req, res) => {
         const hc = isHighCommand(o.discord, cardSt);
         const adm = !!(isSeniorAdmin(o.discord) || (cardSt.adminList || []).includes(o.discord) || hc);
         o.cardAdmin = adm;
-        o.cardKey = (o.sector && CONFIG.SECTORS[o.sector]) ? o.sector : (hc ? "highCommand" : (adm ? "admin" : "default"));
+        o.cardKey = (o.sector && CONFIG.SECTORS[o.sector]) ? o.sector : (hc ? "highCommand" : (isSeniorAdmin(o.discord) ? "senior" : "default"));
         return o;
     }) });
 });
@@ -18118,7 +18123,7 @@ function certKindLbl(k) {
 function certRowHtml(c, canRevoke) {
     var dt = new Date(c.createdAt).toLocaleDateString('ar-SA');
     return '<div style="background:rgba(5,15,10,0.6);padding:10px;border-radius:8px;margin-top:6px;font-size:13px;display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;align-items:center;">' +
-        '<div><b>' + accEsc(c.kindLabel || certKindLbl(c.kind)) + '</b>' + (c.name ? ' — ' + accEsc(c.name) : '') + '<div style="color:var(--muted);font-size:12px;">' + dt + ' • ' + accEsc(c.issuedByRole || '') + ' • <span dir="ltr">' + accEsc(c.code) + '</span>' +
+        '<div><b>' + accEsc(c.kindLabel || certKindLbl(c.kind)) + '</b>' + (c.name ? ' — ' + accEsc(c.name) : '') + '<div style="color:var(--muted);font-size:12px;">' + dt + ' • ' + accEsc(c.issuedByLabel || c.issuedByRole || '') + ' • <span dir="ltr">' + accEsc(c.code) + '</span>' +
         (c.status === 'revoked' ? ' • <span style="color:#f87171;">ملغاة</span>' : '') + '</div></div>' +
         '<div style="display:flex;gap:6px;">' + ('<a class="btn sm" target="_blank" href="/cert/' + accEsc(c.code) + '">📄 عرض / PDF</a>') +
         (canRevoke && c.status !== 'revoked' ? '<button class="btn danger sm" data-c="' + accEsc(c.code) + '" onclick="certRevoke(this.dataset.c)">🗑️ سحب</button>' : '') + '</div></div>';
@@ -19540,7 +19545,8 @@ const MC_LAYOUT = {
     antiDrugs:    { rows: [35.6, 45.4, 55.4, 65.6], gx: 24.7, gw: 24.0, photo: [77.5, 26.5, 18.1, 36.6], bc: [20.5, 75.4, 53.4, 12.5], adm: [23.5, 70.6] },
     roadSecurity: { rows: [35.0, 45.2, 55.4, 65.4], gx: 24.2, gw: 24.3, photo: [77.6, 25.6, 18.6, 37.3], bc: [20.5, 74.4, 55.0, 13.4], adm: [23.5, 69.6] },
     cyber:        { rows: [36.5, 46.2, 55.9, 66.3], gx: 26.1, gw: 23.6, photo: [78.3, 27.3, 18.1, 36.8], bc: [23.4, 76.1, 52.0, 12.9], adm: [23.5, 71.3] },
-    admin:        { rows: [36.5, 46.2, 55.9, 66.3], gx: 26.1, gw: 23.6, photo: [78.3, 27.3, 18.1, 36.8], bc: [23.4, 76.1, 52.0, 12.9], adm: [23.5, 71.3] },
+    // بطاقة كبار المسؤولين (الخلفية 1376×768): ثلاث خانات فقط (الاسم / الرتبة / الوحدة-اليونت في خانة «الكود العسكري») بدون رقم البطاقة وبدون القطاع، والنص أبيض لأن الخانات داكنة
+    senior:       { rows: [44.3, 51.3, 51.3, 58.2], unitRow: true, tc: '#ffffff', gx: 71.9, gw: 17.6, photo: [82.9, 9.4, 12.6, 23.4], bc: [25.6, 83.6, 48.5, 7.2], adm: [23.5, 71.3] },
     highCommand:  { rows: [36.5, 46.2, 55.9, 66.3], gx: 26.1, gw: 23.6, photo: [78.3, 27.3, 18.1, 36.8], bc: [23.4, 76.1, 52.0, 12.9], adm: [23.5, 71.3] },
     default:      { rows: [36.5, 46.2, 55.9, 66.3], gx: 26.1, gw: 23.6, photo: [78.3, 27.3, 18.1, 36.8], bc: [23.4, 76.1, 52.0, 12.9], adm: [23.5, 71.3] }
 };
@@ -19561,7 +19567,7 @@ function mcFace(f) {
     const L = MC_LAYOUT[f.key] || MC_LAYOUT['default'];
     const box = function (a) { return 'left:' + a[0] + '%;top:' + a[1] + '%;width:' + a[2] + '%;height:' + a[3] + '%;'; };
     const t = function (k, y, txt, cls) {
-        return '<div class="mc-t ' + cls + '" data-k="' + k + '" style="left:' + L.gx + '%;width:' + L.gw + '%;top:' + y + '%;font-size:' + mcFs(txt, k === 'num') + ';">' + cardEsc(txt) + '</div>';
+        return '<div class="mc-t ' + cls + '" data-k="' + k + '" style="left:' + L.gx + '%;width:' + L.gw + '%;top:' + y + '%;font-size:' + mcFs(txt, k === 'num') + ';' + (L.tc ? 'color:' + L.tc + ';text-shadow:0 1px 3px rgba(0,0,0,0.85);' : '') + '">' + cardEsc(txt) + '</div>';
     };
     const photo = f.avatar ? '<img class="mc-photo" src="' + cardEsc(f.avatar) + '" alt="" onerror="this.remove()" style="' + box(L.photo) + '">' : '';
     const bc = /^[0-9]{8}$/.test(String(f.num))
@@ -19570,8 +19576,8 @@ function mcFace(f) {
     return '<div class="mc-face" style="background: url(/card-bg/' + f.key + '?v=' + MC_BG_V + ') center / 100% 100% no-repeat, linear-gradient(135deg, #f4f8f5, #dfe9e3);">' +
         t('name', L.rows[0], f.name, 'name') +
         t('rank', L.rows[1], f.rank, 'rank') +
-        t('division', L.rows[2], f.division, 'sector') +
-        t('num', L.rows[3], f.num, 'num') +
+        (L.unitRow ? '' : t('division', L.rows[2], f.division, 'sector')) +
+        (L.unitRow ? t('unit', L.rows[3], f.unit, 'sector') : t('num', L.rows[3], f.num, 'num')) +
         photo + bc +
         (f.admin ? '<div class="mc-adm-in" style="right:' + L.adm[0] + '%;top:' + L.adm[1] + '%;">إداري</div>' : '') +
         (f.revoked ? '<div class="mc-revoked">ملغاة</div>' : '') +
@@ -21615,7 +21621,6 @@ function offPaintBar() {
     if (VC.isSenior && !VC.state.training && !VC.state.cyber && !VC.state.freq && !VC.state.court) qb = '<button class="ov-btn' + (VC.ivHidden ? '' : ' on') + '" onclick="offIvToggle()">' + (VC.ivHidden ? '❓ الأسئلة' : '🙈 إخفاء الأسئلة') + '</button>';
     if (VC.state.court && (offMyRole() === 'senior' || offMyRole() === 'mpl')) qb = '<button class="ov-btn" onclick="offKickedOpen()">🔓 المطرودين</button><button class="ov-btn" onclick="courtEndFromRoom()">⏹️ إنهاء ' + (VC.state.inv ? 'التحقيق' : 'المحكمة') + '</button>';
     if (VC.state.cyber && offMyRole() === 'leader') qb = '<button class="ov-btn" onclick="cyOpsOpen()">📋 نشاطه</button><button class="ov-btn" onclick="offKickedOpen()">🔓 المطرودين</button><button class="ov-btn" onclick="offCyEnd()">⏹️ إنهاء</button>';
-    if (VC.state.freq || VC.state.court) qb += flIsIOS() ? '<button class="ov-btn" onclick="flMicHelp()">🎧 كتم/فتح من الشاشة</button>' : '<button class="ov-btn" onclick="flPipOpen()">🪟 نافذة عائمة</button>';
     box.innerHTML = '<button class="' + micCls + '" onclick="offToggleMic()">' + micTxt + '</button>' + qb +
         '<button class="ov-btn leave" onclick="offLeaveVoice(false)">📞 خروج</button>';
 }
@@ -23371,16 +23376,16 @@ function flSilentWavUrl() {
     return URL.createObjectURL(new Blob([buf], { type: 'audio/wav' }));
 }
 async function flWake() { try { if ('wakeLock' in navigator && FLMIC.active) FLMIC.wake = await navigator.wakeLock.request('screen'); } catch (e) {} }
-function flMicSet(on) { if (VC && (VC.freq || VC.court) && VC.micOn !== on) offToggleMic(); }
+function flMicSet(on) { if (VC && VC.micOn !== on) offToggleMic(); }
 function flMicStart() {
     if (FLMIC.active) return;
     FLMIC.active = true;
     try {
         if ('mediaSession' in navigator) {
             var ms = navigator.mediaSession;
-            ms.metadata = new MediaMetadata({ title: (VC && VC.court) ? 'المحكمة العسكرية' : 'تردد القطاعات المشتركة', artist: 'فلاش', album: 'الراديو', artwork: [{ src: '/icon-512.png', sizes: '512x512', type: 'image/png' }] });
+            ms.metadata = new MediaMetadata({ title: !VC ? 'روم صوتي' : (VC.court ? (VC.state && VC.state.inv ? 'التحقيق العسكري' : 'المحكمة العسكرية') : VC.freq ? 'تردد القطاعات المشتركة' : VC.cyber ? 'تحقيق سيبراني' : VC.training ? 'روم التدريب' : 'مقابلة'), artist: 'فلاش', album: 'الراديو', artwork: [{ src: '/icon-512.png', sizes: '512x512', type: 'image/png' }] });
             ms.playbackState = 'playing';
-            try { ms.setActionHandler('togglemicrophone', function () { if (VC && (VC.freq || VC.court)) offToggleMic(); }); } catch (e) {}
+            try { ms.setActionHandler('togglemicrophone', function () { if (VC) offToggleMic(); }); } catch (e) {}
             try { ms.setActionHandler('pause', function () { flMicSet(false); }); } catch (e) {}
             try { ms.setActionHandler('play', function () { flMicSet(true); }); } catch (e) {}
             try { ms.setActionHandler('stop', function () { flMicSet(false); }); } catch (e) {}
@@ -23421,7 +23426,7 @@ function flMicStop() {
 document.addEventListener('visibilitychange', function () { if (!document.hidden && FLMIC.active) flWake(); });
 if ('serviceWorker' in navigator) {
     navigator.serviceWorker.addEventListener('message', function (e) {
-        if (e.data && e.data.t === 'mic-toggle' && typeof VC !== 'undefined' && VC && (VC.freq || VC.court)) offToggleMic();
+        if (e.data && e.data.t === 'mic-toggle' && typeof VC !== 'undefined' && VC) offToggleMic();
         if (e.data && e.data.t === 'nav' && e.data.url) { try { flNavUrl(e.data.url); } catch (x) {} }
     });
 }
@@ -23444,15 +23449,15 @@ function flMicHelp() {
     cyOverlay('<div style="text-align:center;line-height:1.9;"><div style="font-size:40px;">🎧</div><h3 style="margin:6px 0 10px;">كتم وفتح المايك وانت داخل اللعبة</h3>' +
         '<div style="text-align:right;font-size:14px;">' +
         'آيفون ما يسمح بنافذة عائمة للتطبيقات، فاستخدم أزرار التشغيل:<br>' +
-        '1️⃣ ادخل اللعبة والتردد شغّال.<br>' +
-        '2️⃣ اسحب <b>مركز التحكم</b> (أو افتح <b>شاشة القفل</b>) وبتلقى «فلاش — تردد القطاعات المشتركة».<br>' +
+        '1️⃣ ادخل اللعبة والروم شغّال.<br>' +
+        '2️⃣ اسحب <b>مركز التحكم</b> (أو افتح <b>شاشة القفل</b>) وبتلقى «فلاش» مع اسم الروم اللي أنت فيه.<br>' +
         '3️⃣ <b>⏸ إيقاف مؤقت = كتم المايك</b> 🔇<br>' +
         '4️⃣ <b>▶️ تشغيل = فتح المايك</b> 🎙️<br>' +
         '5️⃣ نفس الشي بالضغط على <b>سماعة AirPods</b> أو زر السماعة.' +
         '</div><button class="btn" style="width:100%;margin-top:12px;" onclick="cyOverlayClose()">فهمت</button></div>');
 }
 function flPipToggle() {
-    if (VC && (VC.freq || VC.court)) offToggleMic();
+    if (VC) offToggleMic();
     FLPIP.self = true;
     try { if (FLPIP.vid) FLPIP.vid.play().catch(function () {}); } catch (e) {}
     setTimeout(function () { FLPIP.self = false; }, 400);
@@ -23949,11 +23954,14 @@ async function courtPanelLoad(silent) {
     h += '<h3 style="margin:14px 0 8px;">🔴 ' + (cinv ? 'التحقيقات الجارية' : 'المحاكمات الجارية') + ' (' + st.active.length + ')</h3>' +
         (st.active.length ? st.active.map(function (c) { return courtCaseHtml(c, st); }).join('') : '<div class="card" style="color:var(--muted);">' + (cinv ? 'لا يوجد تحقيقات جارية' : 'لا يوجد محاكمات جارية') + '</div>');
     if (st.recent.length) h += '<h3 style="margin:14px 0 8px;">📜 ' + (cinv ? 'سجل التحقيقات' : 'آخر المنتهية') + '</h3>' + st.recent.map(function (c) { return courtCaseHtml(c, st); }).join('');
-    if (typing) {
-        var keep = document.getElementById('court-q').value;
-        box.innerHTML = h;
-        var qi = document.getElementById('court-q'); if (qi) { qi.value = keep; qi.focus(); }
-    } else box.innerHTML = h;
+    // التحديث الدوري يعيد رسم الصفحة كاملة، فنحفظ كلمة البحث ونتائجه ونرجعها بعد الرسم (عشان ما تختفي الأسامي)
+    var oldQ = document.getElementById('court-q'), keepQ = oldQ ? oldQ.value : '';
+    var oldCand = document.getElementById('court-cand'), keepCand = oldCand ? oldCand.innerHTML : '';
+    box.innerHTML = h;
+    var qi = document.getElementById('court-q'), ci = document.getElementById('court-cand');
+    if (qi && keepQ) qi.value = keepQ;
+    if (ci && keepCand) ci.innerHTML = keepCand;
+    if (typing && qi) { try { qi.focus(); qi.setSelectionRange(qi.value.length, qi.value.length); } catch (e) {} }
 }
 var courtSearchTimer = null;
 function courtCandBtns(p) {
@@ -23961,14 +23969,18 @@ function courtCandBtns(p) {
     if (COURT.kind === 'inv') return '<button class="btn sm" style="background:#0f766e;" data-u="' + p.discord + '" data-n="' + n + '" onclick="invStart(this.dataset.u, this.dataset.n)">🔎 تحقيق</button>';
     return '<button class="btn sm" data-u="' + p.discord + '" data-n="' + n + '" onclick="courtStart(this.dataset.u, this.dataset.n)">⚖️ محكمة</button>';
 }
+var courtSearchTok = 0;
 function courtSearch(q) {
     clearTimeout(courtSearchTimer);
+    var tok = ++courtSearchTok;
     courtSearchTimer = setTimeout(async function () {
         var box = document.getElementById('court-cand'); if (!box) return;
         if (!q || !q.trim()) { box.innerHTML = ''; return; }
         box.innerHTML = 'جارِ البحث...';
         try {
             var r = await api('/api/senior/personnel?q=' + encodeURIComponent(q), { noLock: true });
+            if (tok !== courtSearchTok) return;
+            box = document.getElementById('court-cand'); if (!box) return;
             var list = (r.list || []).filter(function (p) { return p.registeredName; });
             if (!list.length) { box.innerHTML = '<p style="color:var(--muted);font-size:13px;">لا نتائج</p>'; return; }
             box.innerHTML = list.slice(0, 15).map(function (p) {
