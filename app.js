@@ -11894,6 +11894,7 @@ app.get("/", (req, res) => {
     .mc-bc { position: absolute; display: flex; align-items: center; justify-content: flex-start; cursor: pointer; z-index: 1; -webkit-tap-highlight-color: transparent; text-decoration: none; }
     .mc-bc img { height: 100%; aspect-ratio: 1; background: #fff; padding: 0.3cqw; border-radius: 0.6cqw; box-shadow: 0 0 0 0.25cqw rgba(15,23,42,0.35); }
     .mc-adm-in { position: absolute; z-index: 1; font-size: 2.1cqw; font-weight: 800; line-height: 1.2; color: #dc2626; background: rgba(255,255,255,0.88); border: 0.2cqw solid #dc2626; border-radius: 99px; padding: 0.15cqw 1.2cqw; pointer-events: none; }
+    .mc-warn { margin-top: 8px; padding: 7px 10px; border-radius: 10px; background: rgba(220,38,38,0.14); border: 1px solid rgba(248,113,113,0.55); color: #fca5a5; font-size: 12.5px; font-weight: 700; line-height: 1.7; text-align: center; }
     .mc-adm { text-align: center; margin-top: 8px; font-weight: 800; font-size: 14px; color: #ef4444; }
     .mcard.dbg .mc-t, .mcard.dbg .mc-photo, .mcard.dbg .mc-bc { outline: 1px dashed #d946ef; }
     .mc-cover { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2cqw; background: rgba(15,30,60,0.28); cursor: pointer; z-index: 2; }
@@ -19561,6 +19562,7 @@ function mcFs(txt, isNum) {
     return (n <= 10 ? 2.9 : n <= 14 ? 2.5 : n <= 18 ? 2.1 : n <= 24 ? 1.7 : 1.4) + 'cqw';
 }
 function mcFit(node) { node.style.fontSize = mcFs(node.textContent, node.classList.contains('num')); }
+function mcWarn() { return '<div class="mc-warn">⚠️ تنبيه: هذي البطاقة مخصصة للمحاكاة واللعب فقط، وليست بطاقة حقيقية ولا تمت للواقع بصلة.</div>'; }
 function mcAdminTag(f) { return f.admin ? '<div class="mc-adm">🔴 إداري</div>' : ''; }
 function mcDebug(on) { document.querySelectorAll('.mcard').forEach(function (c) { c.classList.toggle('dbg', on !== false); }); }
 function mcFace(f) {
@@ -19596,7 +19598,7 @@ function cardBlock(p, o) {
         '<div class="mcard locked" onclick="mcTap(this)">' +
             mcFace(f) +
             '<div class="mc-cover">' + eye + '<span>عرض البطاقة</span></div>' +
-        '</div>' + mcAdminTag(f) + remain +
+        '</div>' + mcWarn() + mcAdminTag(f) + remain +
         '<div class="mc-hint">اضغط على البطاقة لعرضها كاملة ⤢</div>' +
     '</div>';
 }
@@ -19773,7 +19775,7 @@ function mcInfoHtml(id) {
     if (id === 'me-card' || id === 'home-card') info += cpSectionHtml();
     const remain = o.hasProgress ? '<div class="mc-remain">' + remainText(o.nextRank, o.remaining) + '</div>' : '';
     return '<div class="mc-wrap unlocked" data-mc="' + id + '">' +
-        '<div class="mcard" onclick="mcTap(this)">' + mcFace(f) + '</div>' + mcAdminTag(f) +
+        '<div class="mcard" onclick="mcTap(this)">' + mcFace(f) + '</div>' + mcWarn() + mcAdminTag(f) +
         '<div class="mc-hint">اضغط على البطاقة لعرضها كاملة ⤢</div>' + remain +
         '<div class="mc-info open">' + info +
             '<div class="row" style="gap:8px;margin-top:4px;">' +
