@@ -2782,10 +2782,11 @@ app.get("/api/me", ensureAuth, async (req, res) => {
         cardPhotoStatus: meCpReq ? meCpReq.status : null,
         cardPhotoReason: meCpReq ? meCpReq.rejectReason : null,
         cardKey: (() => {
+            if (senior) return "senior";
             const s = (meAcc && meAcc.sector) || p.sector || null;
             if (s && CONFIG.SECTORS[s]) return s;
             if (isHighCommand(req.user.id, settings)) return "highCommand";
-            return senior ? "senior" : "default";
+            return "default";
         })(),
         sector: (meAcc && meAcc.sector) || p.sector || null,
         unit: p.unit,
@@ -4001,7 +4002,7 @@ app.get("/api/senior/personnel", ensureSeniorAdmin, async (req, res) => {
         const hc = isHighCommand(o.discord, cardSt);
         const adm = !!(isSeniorAdmin(o.discord) || (cardSt.adminList || []).includes(o.discord) || hc);
         o.cardAdmin = adm;
-        o.cardKey = (o.sector && CONFIG.SECTORS[o.sector]) ? o.sector : (hc ? "highCommand" : (isSeniorAdmin(o.discord) ? "senior" : "default"));
+        o.cardKey = isSeniorAdmin(o.discord) ? "senior" : ((o.sector && CONFIG.SECTORS[o.sector]) ? o.sector : (hc ? "highCommand" : "default"));
         return o;
     }) });
 });
