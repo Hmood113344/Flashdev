@@ -6695,11 +6695,37 @@ app.post("/api/mp/po/reports/:id/reject", ensureMPPersonnelOfficer, async (req, 
 });
 
 
-app.get("/api/bank/ranks", async (req, res) => {
+// ===================== 🏦 بنك فلاش: ربط بتطبيق ويب واحد =====================
+// فلاش يوصل للبنك بزر واحد (دخول تلقائي برابط موقّع فيه الاسم والرتبة)، والبنك يرسل إشعاراته عبر فلاش (Push) فما تحتاج تحمّل تطبيقين.
+// لازم تحط نفس المتغير INTERNAL_API_KEY (نص عشوائي طويل) على موقع فلاش وعلى موقع البنك في Render، وإلا الربط يتوقف.
+const BANK_URL = String(process.env.BANK_URL || "https://bank2-9d45.onrender.com").replace(/\/+$/, "");
+function bankKey() { return String(process.env.INTERNAL_API_KEY || "").trim(); }
+function ensureBankKey(req, res, next) {
+    const k = bankKey();
+    if (!k) return res.status(503).json({ success: false, msg: "INTERNAL_API_KEY غير مضبوط على موقع فلاش" });
+    const got = Buffer.from(String(req.get("x-internal-key") || "")), want = Buffer.from(k);
+    if (got.length !== want.length || !crypto.timingSafeEqual(got, want)) return res.status(403).json({ success: false, msg: "غير مصرح" });
+    next();
+}
+function bankSignToken(payload) {
+    const body = Buffer.from(JSON.stringify(payload)).toString("base64url");
+    return body + "." + crypto.createHmac("sha256", bankKey()).update(body).digest("base64url");
+}
+// زر «بنك فلاش»: يرجّع رابط دخول موقّع (يعيش دقيقة وينستخدم مرة وحدة)
+app.get("/api/bank/sso", ensureAuth, async (req, res) => {
+    try {
+        if (!bankKey()) return res.status(503).json({ error: "البنك غير مربوط بعد — لازم تضبط INTERNAL_API_KEY على فلاش والبنك" });
+        const p = await Personnel.findOne({ discord: req.user.id }, { registeredName: 1, rank: 1, unit: 1 }).lean();
+        if (!p || !p.registeredName) return res.status(400).json({ error: "أكمل تسجيل بياناتك أولاً" });
+        const token = bankSignToken({ uid: req.user.id, name: p.registeredName, rank: p.rank || "", unit: p.unit || "", senior: isSeniorAdmin(req.user.id), exp: Date.now() + 60 * 1000, n: crypto.randomBytes(9).toString("hex") });
+        res.json({ ok: true, url: BANK_URL + "/sso?t=" + encodeURIComponent(token) });
+    } catch (e) { console.error("❌ bank sso:", e.message); res.status(500).json({ error: "تعذر فتح البنك" }); }
+});
+// البنك يسأل عن الرتب (جدول الرواتب) ورتبة كل عسكري — بمفتاح سرّي بين الموقعين
+app.get("/api/bank/ranks", ensureBankKey, async (req, res) => {
     res.json({ success: true, ranks: CONFIG.MILITARY_RANKS });
 });
-
-app.get("/api/bank/personnel-ranks", async (req, res) => {
+app.get("/api/bank/personnel-ranks", ensureBankKey, async (req, res) => {
     try {
         const regUidsB = await getFlashRegisteredUids();
         const list = await Personnel.find({ isBlocked: false, discord: { $in: regUidsB, $nin: Array.from(ownerUids) } }, "discord discordTag rank registeredName");
@@ -6713,6 +6739,18 @@ app.get("/api/bank/personnel-ranks", async (req, res) => {
     } catch (e) {
         res.json({ success: false, msg: e.message });
     }
+});
+// البنك يرسل إشعاراته (راتب، تحويل، قرض...) عبر فلاش كـ Push على أجهزة العضو
+app.post("/api/bank/notify", ensureBankKey, async (req, res) => {
+    try {
+        const b = req.body || {};
+        const uid = String(b.uid || "");
+        const body = String(b.body || "").trim().slice(0, 300);
+        if (!CARD_UID_RE.test(uid) || !body) return res.json({ success: false, msg: "بيانات ناقصة" });
+        const title = String(b.title || "🏦 بنك فلاش").slice(0, 80);
+        await pushUid(uid, { title, body, tag: "bank-" + Date.now(), url: "/?go=bank" });
+        res.json({ success: true });
+    } catch (e) { res.json({ success: false, msg: e.message }); }
 });
 
 const SUPPORT_CATEGORIES = ["مشكلة في الموقع", "مشكلة في حسابي", "مخالفة / نقاط / رتبة", "إجازة", "البطاقة العسكرية", "اقتراح", "أخرى"];
@@ -15094,9 +15132,18 @@ function flGoTo(code) {
         if (code === 'court' && ME.courtStaff) { renderCourtPanel(); return true; }
         if (code === 'fraud' && ME.canFraud) { renderFraudPanel(); return true; }
         if (code === 'certs') { renderCertPage(); return true; }
+        if (code === 'bank') { flBankOpen(); return true; }
     } catch (e) {}
     renderDashboard();
     return true;
+}
+async function flBankOpen() {
+    try {
+        toast('🏦 جاري فتح بنك فلاش...');
+        var r = await api('/api/bank/sso');
+        if (!r || !r.url) throw new Error('تعذر فتح البنك');
+        location.href = r.url;
+    } catch (e) { toast(e.message || 'تعذر فتح البنك'); }
 }
 function flPendingGo() {
     var g = null;
@@ -16296,6 +16343,7 @@ function renderDashboard() {
                 <div><h2 style="margin-bottom:2px;">\${ME.registeredName}</h2><div style="color:var(--muted);font-size:13px;">\${ME.unit} • \${ME.rank}</div></div>
             </div>
             <div class="row" style="gap:8px;">
+                <button class="btn sm btn-checkout" onclick="flBankOpen()">🏦 بنك فلاش</button>
                 \${ME.isAdmin ? '<button class="btn gray sm" onclick="renderAdmin()">لوحة الإدارة</button>' : ''}
                 \${(ME.sectorInfo && ME.sectorInfo.sector !== 'cyber') ? \`<button class="btn gray sm" onclick="renderSectorPanel()">قيادة \${ME.sectorInfo.sectorLabel}</button>\` : ''}
                 <a class="btn gray sm" href="/auth/logout">خروج</a>
