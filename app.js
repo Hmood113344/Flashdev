@@ -6766,8 +6766,9 @@ app.get("/api/bank/status", ensureAuth, async (req, res) => {
         res.json({ up: r.status < 500 });
     } catch (e) { res.json({ up: false }); }
 });
+var BANK_WAIT_PHRASES = ["⚡ جاري تشغيل الاستضافة...", "🤍 صلِّ على النبي ﷺ", "🔧 نجهّز الخوادم لك", "🌿 استغفر ربك", "🔐 نأمّن الاتصال بحسابك", "📿 سبحان الله وبحمده", "💳 نحمّل بياناتك البنكية", "☝️ لا إله إلا الله", "🚀 على وشك الانتهاء", "🤲 لا حول ولا قوة إلا بالله", "⏳ ثواني ويفتح تلقائياً", "🌙 الحمد لله"];
 function bankWakePage() {
-    return '<!DOCTYPE html><html lang="ar" dir="rtl"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>بنك فلاش</title><style>body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;background:#0a1628;color:#e2e8f0;font-family:Tahoma,Arial,sans-serif;text-align:center;padding:20px}.sp{width:54px;height:54px;border:5px solid #1e3a5f;border-top-color:#3b82f6;border-radius:50%;animation:r 1s linear infinite;margin:0 auto 18px}@keyframes r{to{transform:rotate(360deg)}}p{font-size:18px;line-height:1.9;margin:0}small{color:#64748b;display:block;margin-top:10px}</style></head><body><div><div class="sp"></div><p>🏦 جاري تشغيل البنك...</p><small id="m">ثواني ويفتح تلقائياً</small></div><script>var t0=Date.now();function chk(){fetch("/api/bank/status",{credentials:"same-origin"}).then(function(r){return r.json()}).then(function(d){if(d&&d.up){location.reload()}else{nx()}}).catch(nx)}function nx(){if(Date.now()-t0>180000){document.getElementById("m").textContent="البنك تأخر، حدّث الصفحة بعد شوي";return}setTimeout(chk,2500)}chk();</script></body></html>';
+    return '<!DOCTYPE html><html lang="ar" dir="rtl"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>بنك فلاش</title><style>body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;background:#0a1628;color:#e2e8f0;font-family:Tahoma,Arial,sans-serif;text-align:center;padding:20px}.sp{width:54px;height:54px;border:5px solid #1e3a5f;border-top-color:#3b82f6;border-radius:50%;animation:r 1s linear infinite;margin:0 auto 18px}@keyframes r{to{transform:rotate(360deg)}}p{font-size:18px;line-height:1.9;margin:0}small{color:#94a3b8;display:block;margin-top:10px;font-size:15px;min-height:24px;transition:opacity .35s}</style></head><body><div><div class="sp"></div><p>🏦 جاري تشغيل البنك...</p><small id="m">ثواني ويفتح تلقائياً</small></div><script>var P=' + JSON.stringify(BANK_WAIT_PHRASES) + ',pi=0,pm=document.getElementById("m");pm.textContent=P[0];var T=setInterval(function(){pi=(pi+1)%P.length;pm.style.opacity=0;setTimeout(function(){pm.textContent=P[pi];pm.style.opacity=1},350)},3500);var t0=Date.now();function chk(){fetch("/api/bank/status",{credentials:"same-origin"}).then(function(r){return r.json()}).then(function(d){if(d&&d.up){location.reload()}else{nx()}}).catch(nx)}function nx(){if(Date.now()-t0>180000){clearInterval(T);document.getElementById("m").textContent="البنك تأخر، حدّث الصفحة بعد شوي";return}setTimeout(chk,2500)}chk();</script></body></html>';
 }
 // البنك يسأل عن الرتب (جدول الرواتب) ورتبة كل عسكري — بمفتاح سرّي بين الموقعين
 app.get("/api/bank/ranks", ensureBankKey, async (req, res) => {
@@ -15191,10 +15192,20 @@ async function flBankOpen() {
         ov = document.createElement('div');
         ov.id = 'fl-bank-wake';
         ov.style.cssText = 'position:fixed;inset:0;z-index:99999;background:rgba(10,22,40,0.97);display:flex;align-items:center;justify-content:center;text-align:center;color:#e2e8f0;font-family:Tahoma,Arial,sans-serif;padding:20px';
-        ov.innerHTML = '<style>@keyframes flbw{to{transform:rotate(360deg)}}</style><div><div style="width:54px;height:54px;border:5px solid #1e3a5f;border-top-color:#3b82f6;border-radius:50%;animation:flbw 1s linear infinite;margin:0 auto 18px"></div><p style="font-size:18px;margin:0">🏦 جاري تشغيل البنك...</p><small style="color:#64748b;display:block;margin-top:10px">ثواني ويفتح تلقائياً</small></div>';
+        ov.innerHTML = '<style>@keyframes flbw{to{transform:rotate(360deg)}}</style><div><div style="width:54px;height:54px;border:5px solid #1e3a5f;border-top-color:#3b82f6;border-radius:50%;animation:flbw 1s linear infinite;margin:0 auto 18px"></div><p style="font-size:18px;margin:0">🏦 جاري تشغيل البنك...</p><small id="fl-bank-phrase" style="color:#94a3b8;display:block;margin-top:10px;font-size:15px;min-height:24px;transition:opacity .35s">ثواني ويفتح تلقائياً</small></div>';
         document.body.appendChild(ov);
     }
     ov.style.display = 'flex';
+    var phraseTimer = null, ph = document.getElementById('fl-bank-phrase'), pi = 0;
+    var PH = ["⚡ جاري تشغيل الاستضافة...", "🤍 صلِّ على النبي ﷺ", "🔧 نجهّز الخوادم لك", "🌿 استغفر ربك", "🔐 نأمّن الاتصال بحسابك", "📿 سبحان الله وبحمده", "💳 نحمّل بياناتك البنكية", "☝️ لا إله إلا الله", "🚀 على وشك الانتهاء", "🤲 لا حول ولا قوة إلا بالله", "⏳ ثواني ويفتح تلقائياً", "🌙 الحمد لله"];
+    if (ph) {
+        ph.textContent = PH[0];
+        phraseTimer = setInterval(function () {
+            pi = (pi + 1) % PH.length;
+            ph.style.opacity = 0;
+            setTimeout(function () { ph.textContent = PH[pi]; ph.style.opacity = 1; }, 350);
+        }, 3500);
+    }
     try {
         var up = false, t0 = Date.now();
         while (Date.now() - t0 < 150000) {
@@ -15208,6 +15219,7 @@ async function flBankOpen() {
         if (!r || !r.url) throw new Error('تعذر فتح البنك');
         location.href = r.url;
     } catch (e) {
+        if (phraseTimer) clearInterval(phraseTimer);
         ov.style.display = 'none';
         toast(e.message || 'تعذر فتح البنك');
     }
