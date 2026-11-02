@@ -1845,6 +1845,21 @@ const app = express();
 });
 
 app.use(express.json({ limit: "8mb" }));
+// 🏦 أي أحد يفتح موقع فلاش (صفحة، مو API) → نصحّي البنك معه بالخلفية، بدون ما ننتظره ولا نبطّئ الصفحة
+var __bankWakeAt = 0;
+function bankWakeSoft() {
+    try {
+        var now = Date.now();
+        if (now - __bankWakeAt < 2 * 60 * 1000) return; // مرة كل دقيقتين كحد أقصى
+        __bankWakeAt = now;
+        var u = String(process.env.BANK_URL || "https://bank2-9d45.onrender.com").replace(/\/+$/, "");
+        fetch(u + "/healthz", { signal: AbortSignal.timeout(60000), headers: { "User-Agent": "flash-wake-bank" } }).catch(function () {});
+    } catch (e) {}
+}
+app.use(function (req, res, next) {
+    if (req.method === "GET" && !/^\/(api|bank|healthz|static|assets)\b/.test(req.path) && String(req.headers.accept || "").indexOf("text/html") !== -1) bankWakeSoft();
+    next();
+});
 // ================= النشر من فلاش المطورين إلى فلاش الرسمي =================
 // المتغيرات: DEPLOY_SECRET (نفس القيمة على الموقعين) — وعلى المطورين بس: DEV_MODE=1 و DEPLOY_TARGET_URL (رابط الرسمي)
 const DEPLOY_SETTINGS_KEYS = ["rankThresholds", "warningPenalties", "leaveBalanceDefault", "notifTitle", "notifBody", "supportCanned", "attConfig"];
@@ -24378,6 +24393,7 @@ process.on("uncaughtException", (err) => {
 
 app.listen(CONFIG.PORT, "0.0.0.0", () => {
     console.log(`🚀 ${CONFIG.SITE_NAME} server running on port ${CONFIG.PORT}`);
+    bankWakeSoft(); // فلاش قام → صحّي البنك معه
     if (global.__FLASH_RELEASE__) setTimeout(() => { try { require("fs").unlinkSync(require("path").join(__dirname, "flash_boot.json")); } catch (e) {} }, 90000).unref();
 });
 
