@@ -1017,6 +1017,34 @@ async function sweepExpiredLeaves() {
 }
 setInterval(() => { sweepExpiredLeaves().catch(() => {}); }, 5 * 60 * 1000);
 setTimeout(() => { sweepExpiredLeaves().catch(() => {}); }, 20000);
+
+// ── تجديد رصيد الإجازات شهرياً: أول كل شهر الساعة 12 بالليل بتوقيت مكة المكرمة (Asia/Riyadh) ──
+// يرجّع رصيد الكل للرصيد الافتراضي (settings.leaveBalanceDefault = 10 يوم). يتسجّل الشهر في الجدول عشان ما يتكرر.
+const LeaveRenewRun = mongoose.model("LeaveRenewRun", new mongoose.Schema({
+    monthKey: { type: String, unique: true }, at: { type: Date, default: Date.now },
+    seeded: { type: Boolean, default: false }, count: { type: Number, default: 0 }, balance: { type: Number, default: 0 },
+}));
+function makkahMonthKey() {
+    const p = new Intl.DateTimeFormat("en-GB", { timeZone: "Asia/Riyadh", year: "numeric", month: "2-digit" }).formatToParts(new Date());
+    return (p.find(x => x.type === "year") || {}).value + "-" + (p.find(x => x.type === "month") || {}).value;
+}
+async function renewLeaveBalancesTick() {
+    const monthKey = makkahMonthKey();
+    if (await LeaveRenewRun.exists({ monthKey })) return;
+    // أول تشغيل للنظام: نسجّل الشهر الحالي بدون تجديد (عشان ما يتصفّر الرصيد في نص الشهر) — أول تجديد فعلي مع بداية الشهر الجاي
+    const first = !(await LeaveRenewRun.exists({}));
+    try { await LeaveRenewRun.create({ monthKey, seeded: first }); } catch (e) { return; } // unique = ما يتكرر حتى لو في أكثر من نسخة شغالة
+    if (first) { console.log("🌴 نظام تجديد الإجازات الشهري شغال — أول تجديد مع بداية الشهر الجاي (" + monthKey + " تم تسجيله بدون تجديد)"); return; }
+    const settings = await getSettings();
+    const bal = settings.leaveBalanceDefault ?? CONFIG.DEFAULT_LEAVE_BALANCE;
+    const r = await Personnel.updateMany({}, { $set: { leaveBalance: bal } });
+    const count = r.matchedCount ?? r.n ?? 0;
+    await LeaveRenewRun.updateOne({ monthKey }, { $set: { count, balance: bal } });
+    await logEvent({ action: "تجديد رصيد الإجازات الشهري", actorId: "system", actorTag: "النظام", details: "شهر " + monthKey + " — رجع رصيد " + count + " عسكري إلى " + bal + " يوم" });
+    console.log("🌴 تجديد رصيد الإجازات (" + monthKey + "): " + count + " → " + bal + " يوم");
+}
+setInterval(() => { renewLeaveBalancesTick().catch(e => console.error("❌ تجديد رصيد الإجازات:", e.message)); }, 60 * 1000);
+setTimeout(() => { renewLeaveBalancesTick().catch(() => {}); }, 30000);
 // تسجيل حضور أثناء الإجازة => تنتهي الإجازة ويُخصم من الرصيد الأيام اللي قضاها فقط
 async function endLeaveOnAttendance(uid) {
     const leave = await LeaveRequest.findOne({ discord: uid, status: "approved" });
@@ -2948,6 +2976,7 @@ app.get("/api/me", ensureAuth, async (req, res) => {
         att: meAtt, attRequired: attRequired(req.user.id) && !meMedia.isMedia, pwaInstalled: mePwa,
         isReceptionOfficer: isReceptionOfficer(req.user.id, settings) || senior,
         receptionOpen: recState.open,
+        receptionShifts: CONFIG.RECEPTION_SHIFTS.map(sh => ({ id: sh.id, label: sh.label, start: sh.start, openUntil: sh.openUntil })),
         courtStaff: meCourt.staff, courtLeader: meCourt.leader, courtLocked: !!courtCaseOf(req.user.id), courtCase: courtCaseOf(req.user.id), courtSoon: courtSoonOf(req.user.id),
         discordId: req.user.id,
         discordTag: req.user.username,
@@ -12018,8 +12047,10 @@ app.post("/api/reception/open", ensureAuth, async (req, res) => {
     if (!isSr) {
         const sh = CONFIG.RECEPTION_SHIFTS.find(s => nowMin >= s.start && nowMin <= s.openUntil);
         if (!sh) {
+            // بعد انتهاء وقت فتح أي شفت (3:45 للأول / 8:15 للثاني) الزر يتقفل ويطلع له: انتهى وقت الاستلام
+            if (CONFIG.RECEPTION_SHIFTS.some(s => nowMin > s.openUntil)) return res.status(400).json({ error: "⛔ انتهى وقت الاستلام", closedWindow: true });
             const nxt = CONFIG.RECEPTION_SHIFTS.find(s => nowMin < s.start);
-            return res.status(400).json({ error: nxt ? ("⏰ مو وقت فتح الاستلام — " + nxt.label + " يفتح من " + fmtMin(nxt.start) + " إلى " + fmtMin(nxt.openUntil)) : "⏰ انتهت استلامات اليوم — الاستلام الجاي بكرة" });
+            return res.status(400).json({ error: "⏰ مو وقت فتح الاستلام — " + (nxt ? (nxt.label + " يفتح من " + fmtMin(nxt.start) + " إلى " + fmtMin(nxt.openUntil)) : "الاستلام الجاي بكرة") });
         }
         const done = await RecDay.findOne({ shift: sh.id, free: { $ne: true }, openedAt: { $gte: attDayStart(new Date()) } }, { _id: 1 }).lean();
         if (done) return res.status(409).json({ error: "🚫 " + sh.label + " انفتح له استلام اليوم ولا يتكرر" });
@@ -25070,10 +25101,29 @@ function flAttCardHtml() {
 }
 // ملاحظة: هنا التردد — زر التردد محذوف من الصفحة الرئيسية، والكود باقي ما انحذف
 function flFreqBtnHtml() { return '<button class="btn sm" onclick="flFreqOpen()">📻 تردد القطاعات المشتركة</button>'; }
+function flRcMin() {
+    var p = new Intl.DateTimeFormat('en-GB', { timeZone: 'Asia/Riyadh', hour: '2-digit', minute: '2-digit', hour12: false }).formatToParts(new Date());
+    var h = parseInt((p.find(function (x) { return x.type === 'hour'; }) || {}).value, 10) % 24;
+    var m = parseInt((p.find(function (x) { return x.type === 'minute'; }) || {}).value, 10);
+    return h * 60 + m;
+}
+function flRcFmt(m) { var h = Math.floor(m / 60) % 12 || 12, mm = m % 60; return h + ':' + (mm < 10 ? '0' : '') + mm; }
+// وقت فتح الاستلام: بعد انتهاء وقت الشفت (3:45 / 8:15) الزر يتقفل. الكبار مستثنين.
+function flRcWindow() {
+    if (!ME || ME.isSeniorAdmin) return { ok: true };
+    var sh = ME.receptionShifts || [];
+    if (!sh.length) return { ok: true };
+    var n = flRcMin();
+    for (var i = 0; i < sh.length; i++) if (n >= sh[i].start && n <= sh[i].openUntil) return { ok: true };
+    for (var j = 0; j < sh.length; j++) if (n > sh[j].openUntil) return { ok: false, msg: '⛔ انتهى وقت الاستلام' };
+    return { ok: false, msg: '⏰ مو وقت فتح الاستلام — ' + sh[0].label + ' يفتح من ' + flRcFmt(sh[0].start) + ' إلى ' + flRcFmt(sh[0].openUntil) };
+}
+function flReceptionLocked() { toast(flRcWindow().msg || '⛔ انتهى وقت الاستلام'); }
 function flRcBtnHtml() {
     if (!ME || !ME.isReceptionOfficer) return '';
     if (!ME.isSeniorAdmin && !(ME.att && ME.att.status === 'in')) return '';
     if (ME.receptionOpen) return '<button class=\"btn sm danger\" onclick=\"flReceptionClose()\">🔒 إغلاق الاستلام</button>';
+    if (!flRcWindow().ok) return '<button class=\"btn sm gray\" style=\"opacity:.6;\" onclick=\"flReceptionLocked()\">🔒 فتح استلام</button>';
     return '<button class=\"btn sm\" onclick=\"flReceptionOpen()\">🎤 فتح استلام</button>';
 }
 function flRcRefresh() {
@@ -25082,6 +25132,7 @@ function flRcRefresh() {
     var h = flRcBtnHtml();
     if (w.innerHTML !== h) w.innerHTML = h;
 }
+setInterval(function () { try { flRcRefresh(); } catch (e) {} }, 15000);
 function flAfterBtnsHtml() {
     var h = '';
     if (ME && ME.att && ME.att.status === 'in') {
